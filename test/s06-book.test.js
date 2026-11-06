@@ -16,7 +16,7 @@ test('S06: with 3 seats left, booking 2 creates a pending booking for 2 seats, p
   const ctx = publishedEvent({ capacity: 3, priceCents: 500_000 });
   const booking = book(ctx, 2);
 
-  assert.equal(booking.status, 'PENDING');
+  assert.equal(booking.status, 'pending');
   assert.equal(booking.quantity, 2);
   assert.equal(booking.totalCents, 1_000_000); // 2 x 500000, an exact integer
   assert.ok(Number.isSafeInteger(booking.totalCents));

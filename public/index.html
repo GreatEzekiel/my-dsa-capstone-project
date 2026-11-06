@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Event Ticketing</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="card">
+      <p class="eyebrow">Event Ticketing</p>
+      <h1>The server is running</h1>
+      <p class="status" aria-live="polite">
+        <span id="dot" class="dot" aria-hidden="true"></span>
+        <span id="status-text">Checking /health&hellip;</span>
+      </p>
+      <p class="hint">
+        This page is a file from <code>public/</code>. The API answers at
+        <a href="/health"><code>/health</code></a>; anything else under <code>/api</code> is a JSON error for now.
+        Test it with Postman: see <code>docs/postman.md</code>.
+      </p>
+    </main>
+    <script src="/app.js" defer></script>
+  </body>
+</html>

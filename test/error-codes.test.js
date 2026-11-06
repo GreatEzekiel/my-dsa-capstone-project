@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { DomainError, ErrorCode } from '../src/domain/errors.js';
 import {
   createStore, createEvent, addTier, publishEvent, bookTickets, cancelBooking, findBookingByReference,
-  joinWaitlist,
+  joinWaitlist, transitionBooking,
 } from '../src/domain/inventory.js';
 import { code, inDays, publishedEvent } from './helpers.js';
 
@@ -49,6 +49,12 @@ const TRIGGERS = {
     publishEvent(store, event.id);
     now = Date.parse('2026-01-03T00:00:00Z'); // the event is over
     return () => bookTickets(store, { eventId: event.id, tierId: tier.id, quantity: 1, customer: 'Ada' });
+  },
+  INVALID_TRANSITION: () => {
+    const { store, event, tier } = publishedEvent();
+    const b = bookTickets(store, { eventId: event.id, tierId: tier.id, quantity: 1, customer: 'Ada' });
+    cancelBooking(store, b.reference);
+    return () => transitionBooking(store, b.reference, 'paid'); // paying a cancelled booking
   },
   INVALID_STATE: () => {
     const store = createStore();

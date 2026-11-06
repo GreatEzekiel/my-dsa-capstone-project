@@ -13,6 +13,7 @@ export const ErrorCode = Object.freeze({
   WAITLIST_FIRST: 'WAITLIST_FIRST', // people are already waiting: join the line, don't jump it
   ALREADY_WAITING: 'ALREADY_WAITING', // the same person is already in this tier's line
   EVENT_STARTED: 'EVENT_STARTED', // the event has begun: no new bookings or waitlist joins
+  INVALID_TRANSITION: 'INVALID_TRANSITION', // a booking was asked to make a move the life cycle does not allow (paying a cancelled booking)
   INVALID_STATE: 'INVALID_STATE', // the action is not allowed in the current state (publishing with no tiers, booking a draft)
 });
 

@@ -125,3 +125,101 @@ Same rule as Build 1: read it, run it, try to break it. The brief says "when it 
 3. **Started events stay on the public list.** Booking is refused once an event has started, but `listEventSummaries` still lists it with its seats. The brief does not say to hide them. Decide in your class.
 4. **"Cheapest tier" includes sold-out tiers.** An event whose cheapest tier is sold out still shows that tier's price. The brief says "compares with the cheapest tier", so I did exactly that.
 5. **Identity is still just a name** (from Build 1).
+
+---
+---
+
+# Build 3: architecture, state machine, server skeleton
+
+Same rule as before: read it, run it, try to break it. This time the first run of the new tests was **suspiciously clean**
+(nearly everything passed straight away), so I did not trust it: I weakened the code on purpose, 22 different ways, to see whether the tests would notice. That is where the interesting findings came from.
+
+## Checks I ran
+
+| Check | How | Result |
+|-------|-----|--------|
+| Every booking move | all 25 (from, to) pairs, one test each; the expected answers written a second time in a different shape | 5 allowed, 20 refused |
+| The same moves on **real bookings** | the 20 illegal ones must be refused and leave the record, seats and history untouched; the 5 legal ones must work and give seats back when they should | Pass |
+| Random walk | 4,000 random move attempts; after every one: seats match the bookings, every history is a legal path, a move succeeded only if `canTransition` said yes | Pass |
+| The diagrams match the code | a test reads `docs/architecture.md` and compares the state diagram with `MOVES`; another reads every `import` and checks the layer rules | Pass |
+| **Are the diagrams valid Mermaid?** | all three parsed with Mermaid's own parser, plus a deliberately broken diagram that must be rejected | 3 valid, the broken one rejected |
+| `/health` over a real connection | `fetch` to a real server on a free port | `200 {"status":"ok"}` |
+| The real program | a test starts `node src/server.js` as a separate process, calls `/health` and `/`, sends SIGTERM | Exit code 0 |
+| Bad `PORT`, taken port | the same test style | Exit code 1, one clear line, no stack trace |
+| Every error has one shape | 7 different errors checked together, and every error test checks the exact keys and a list of stack-trace fingerprints | Pass |
+| A bug never leaks | a route that throws `database password is hunter2`: the client gets `Something went wrong`; the log gets the stack | Pass |
+| 24 path-traversal disguises | raw paths (not tidied by a client library), with a **control experiment** proving the secret exists and normal files are served | Never 200, secret never leaked |
+| Postman | **Newman** (Postman's command-line runner) ran `postman/event-ticketing.postman_collection.json` against the real server | 22 requests, 109 assertions, 0 failures. The server log showed the climbing paths arrived unchanged |
+| The whole suite | `npm test` | **328 Node tests + 13 UI tests**, all pass |
+| Look of the page and the Postman app | I cannot open a browser or the Postman app in my sandbox | **Not checked by eye.** Open http://localhost:3000, and run the collection in the real Postman app |
+
+## What the mutation checks found (22 deliberate bugs)
+
+| What I broke | Tests that failed | What it taught |
+|--------------|:----------------:|----------------|
+| Booking can leave `cancelled` for `paid` | 10 | The state machine tests really guard the table |
+| `transitionBooking` skips the state machine | 24 | The lifecycle tests really use the real store |
+| `transitionBooking` forgets to give seats back | 6 | Seats are checked, not just status |
+| A stack trace put in the 500 response | 5 | The no-leak tests work |
+| Bad JSON turned into a 500 / unknown `/api` falls to static / no body limit / bugs not logged | 3 / 1 / 1 / 2 | Each HTTP rule has a test that owns it |
+| Missing HTTP status for `INVALID_TRANSITION` | 2 | The "every code has a status" table test works |
+| Router: parameter beats fixed word | 1 | |
+| `parseInt`-style PORT | 1 | |
+| A route importing the data layer / a rule importing a service | 2 / 1 | The architecture test enforces the diagram |
+| Dotfiles served / no decoding before the checks / symlink escape allowed | 5 / 1 / 2 | |
+| **Remove just the `..` check, or just the "still inside" check** | **0** | **Not a gap: the layers cover for each other** (see below) |
+| **Remove `..`, "still inside" AND the real-path check (every defence against climbing)** | **2** | The tests notice a real hole |
+| **Allow backslashes** | **0, then 4** | **A real weakness in my tests: see F3** |
+
+**Why "0 failures" is correct for the first two:** the static-file defence has four layers. Any single layer, or even two,
+still stops every attack, so the outcome (a `400` or `404`) does not change. Only removing every defence against climbing lets the secret out.
+That is exactly what defence in depth means, and it is why one test per layer would not have been enough: the tests prove the **outcome**.
+
+## Problems found and fixed
+
+| # | Where | What was wrong | How it was found | Fix |
+|---|-------|----------------|------------------|-----|
+| C1 | Build 2 vs the Build 3 brief | Bookings used `'PENDING'` and `'CANCELLED'` (upper-case). The brief's states are `pending`, `paid`, `cancelled`, `refunded`, `checked_in`. Two spellings of the same state would have been a bug waiting to happen. | Reading the brief against the code | The state machine is the single source of the words; bookings, tests and the UI use them. All earlier tests updated |
+| C2 | `cancelBooking` | Two errors now overlapped: Build 1's `ALREADY_CANCELLED` and the new `INVALID_TRANSITION` (a cancelled booking "cannot become cancelled"). | Thinking through "cancel twice" with the new rules | Cancelling twice **keeps** the friendly `ALREADY_CANCELLED`; every other illegal cancel (refunded, checked in) is `INVALID_TRANSITION`. Both tested |
+| C3 | Build 1/2 booking | There was no single place that changed a booking's status: `cancelBooking` changed it by hand. The next stories (pay, refund, check-in) would each have done the same, and one would have skipped the rule. | Designing for S07, S09, S10 | `transitionBooking`: the **one door**. Everything, including `cancelBooking`, goes through it |
+| C4 | Booking records | A booking carried no record of what had happened to it. | Thinking about refunds and disputes | A frozen `history` of every status and when |
+| C5 | `PORT` | `parseInt("3000abc")` is `3000`, so a typo would start the server on a port nobody asked for. | Knowing how `parseInt` behaves | PORT must be digits only, 0 to 65535, otherwise start-up stops with one clear line. 12 bad values tested |
+| C6 | Node's own behaviour | For a request that is not even HTTP, Node answers with a **plain-text** `400`. That would break "every error has the same shape". | Knowing Node's default | A `clientError` handler answers in the standard JSON. Tested with a raw TCP socket |
+| C7 | HTTP errors | Domain error messages and parser errors can quote user input; a `JSON.parse` message can quote part of the body. | Thinking about what reaches the client | Bad JSON gets a fixed sentence; the 404 message cuts a long path at 200 characters; a test checks the body is not echoed |
+| C8 | Static files | A request path can hide `..` as `%2e%2e`, `..%2f`, a backslash, a null byte, double encoding, or a symlink inside `public/`. Checking the raw text would miss every disguise. | Threat-modelling the brief's "never allow a path to escape that folder" | Four layers: decode first then refuse; refuse dotfiles; check the joined path; check the **real** path after symlinks. 24 disguises tested, plus a control experiment |
+| C9 | `server.close()` | Plain `close()` waits for every keep-alive connection, which can hang for a long time. | Knowing Node's behaviour | `close()` drops idle connections at once, gives busy ones a few seconds, then forces. Tested: the port is freed |
+| C10 | Error table | The next time someone adds a domain error code, nothing would give it an HTTP status. | Thinking ahead | A test compares the status table with `ErrorCode`: adding a code without a status fails. (The same guard already caught my own new `INVALID_TRANSITION` in `error-codes.test.js`, which proved it works.) |
+
+## Problems with my own tests, found by the mutation checks and corrected
+
+| # | What | Fix |
+|---|------|-----|
+| F1 | My first traversal test accepted "400 **or** 404", so it could not tell whether the explicit refusal of backslashes was still there. Removing that check changed 400 to 404 and nothing failed. On Linux a backslash is just a letter in a file name, so the outcome looks harmless. | A separate group of tests demands a specific **400** for backslashes, null bytes, `..` and encoded slashes. The same mutation now fails 4 tests |
+| F2 | While writing the dotfile test I left in a nonsense assertion (a regex that could never fail). | Deleted, replaced with a real check of the error code |
+| F3 | The "port already in use" test started a second server it never used. | Simplified to one server and one clash |
+| F4 | My first mutation of the path layers looked like a hole in the tests (0 failures). | It was not (see above). I checked by removing every climbing defence and the tests failed, so the tests were right and my expectation was wrong |
+
+## Rules the brief left open (my decisions: change them if your class decides otherwise)
+
+- **What "cancelled after paying" means.** The brief allows `paid → cancelled` *and* `paid → refunded`. I treated `cancelled` as "the booking is void" and `refunded` as "void, and the money went back". Both give the seats back. When money is really handled (S09, S10), you may want a rule such as "cancelling a paid booking must refund it".
+- **`checked_in` keeps its seats** (the person is there). `cancelled` and `refunded` give them back.
+- **An unknown state name** (`assertTransition('paid', 'teleported')`) throws `INVALID_TRANSITION`, not `VALIDATION`, so that `canTransition` is `false` exactly when `assertTransition` throws.
+- **Bad JSON is a 400 even on a path with no route**, because the body is read before routing (as Express does). A valid body to an unknown `/api` path is a 404. Bodies that are not sent as JSON get **415** and oversize ones **413**: the brief does not name these.
+- **Missing static files give the JSON 404** too (the brief says "every error has the same shape").
+- **Suspicious paths** (`..`, backslash, null byte) are **400**; missing files, dotfiles and symlinks that lead out are **404**.
+- **`PORT=0`** is accepted (any free port): the tests rely on it.
+- **`HOST`** defaults to `127.0.0.1` (this computer only). It is not in the brief; use `HOST=0.0.0.0` in a container.
+- **HEAD** is supported (it is GET without a body). Other methods on files are 405.
+- **A Content-Security-Policy** is added to HTML pages (`default-src 'self'`). When the built React app is later served from `public/`, this is the first place to look if a font or script is blocked (the React page loads Google Fonts today).
+- **Where the layers are today:** `inventory.js` is both the data and the rules that must change data atomically (never oversell, people waiting go first). It splits into repositories and services when a database arrives. The diagram says so.
+- **`USER` is in the data model but not in the code.** It is marked *planned*.
+
+## What is NOT finished, and why
+
+1. **Nothing was looked at by eye:** not the landing page (`public/index.html`), not the Mermaid diagrams as pictures (they parse, but I have not seen them drawn), not the search screen, and not the Postman **app** (Newman ran the same collection). Open them.
+2. **No routes for bookings yet.** `transitionBooking` exists and is tested, but no URL calls it. Payment, refund and check-in come with S07, S09 and S10.
+3. **Rules about *when* a move is allowed** (for example no check-in before the event day) are not in the table, which only says which moves exist. They belong to those stories.
+4. **The React screen still runs the domain inside the browser**; it does not call the server yet.
+5. **Out of scope on purpose:** HTTPS, logins, rate limiting, CORS (Postman and same-origin pages do not need it). Each will need a decision later.
+6. **Windows:** the symlink tests skip themselves where symlinks can't be created, and the backslash defence is only *observable* there. The explicit-400 tests cover it on every system.
+7. **Carried over:** started events still appear on the public list; "cheapest tier" includes sold-out tiers; identity is still just a name.

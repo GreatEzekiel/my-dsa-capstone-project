@@ -10,6 +10,7 @@
 import { DomainError, ErrorCode } from './errors.js';
 import { newId, newReference, referenceKey } from './ids.js';
 import { parseWhen } from './dates.js';
+import { BookingState, assertTransition, holdsSeats } from './bookingStateMachine.js';
 import { EventStatus } from './eventStatus.js';
 import { isMoney } from './money.js';
 import { Queue } from './waitlistQueue.js';
@@ -242,9 +243,12 @@ function createBooking(state, tier, qty, name) {
     quantity: qty,
     customer: name,
     totalCents: tier.priceCents * qty, // integer x integer = integer, no rounding
-    // PENDING: the seats are held, but the booking is not final yet (a later build adds payment).
-    status: 'PENDING',
+    // pending: the seats are held, but the booking is not final yet (payment comes later).
+    // From here on, every change of status goes through transitionBooking and the state machine.
+    status: BookingState.PENDING,
     createdAt: new Date(state.now()).toISOString(),
+    // A record of every status the booking has had, oldest first (an audit trail). Frozen, like everything else.
+    history: Object.freeze([Object.freeze({ status: BookingState.PENDING, at: new Date(state.now()).toISOString() })]),
   });
   tier.sold += qty; // take the seats
   state.bookings.set(referenceKey(reference), booking); // index it for O(1) lookup
@@ -296,22 +300,50 @@ export function findBookingByReference(store, reference) {
   return booking;
 }
 
+/**
+ * The ONE door through which a booking changes status (paid, cancelled, refunded, checked in...).
+ * 1. Ask the state machine: is this move allowed? If not, throw INVALID_TRANSITION. Nothing has changed yet.
+ * 2. Only then change the booking and, if the move gives seats back, release them.
+ * Later builds (payment, refunds, check-in) call this; they never set `status` themselves.
+ */
+export function transitionBooking(store, reference, to) {
+  const state = stateOf(store);
+  const booking = findBookingByReference(store, reference); // NOT_FOUND if unknown
+  assertTransition(booking.status, to); // INVALID_TRANSITION if the life cycle forbids it
+
+  const tier = state.tiers.get(booking.tierId);
+  const had = holdsSeats(booking.status);
+  const will = holdsSeats(to);
+  // Seats follow the status: leaving a seat-holding state for a non-holding one (cancelled, refunded) gives them back.
+  if (had && !will) tier.sold -= booking.quantity;
+  // The opposite move (taking seats back) would need a capacity check. No move in the table does that, so
+  // this can't happen today. If someone adds such a move later, fail loudly instead of corrupting the seat count.
+  if (!had && will) throw new Error('This move would need seats taken back: not implemented');
+
+  const at = new Date(state.now()).toISOString();
+  const updated = Object.freeze({
+    ...booking, // a COPY of the old booking (the old one is frozen and stays as it was)
+    status: to,
+    ...(to === BookingState.CANCELLED ? { cancelledAt: at } : {}),
+    history: Object.freeze([...booking.history, Object.freeze({ status: to, at })]),
+  });
+  state.bookings.set(referenceKey(booking.reference), updated);
+  return updated;
+}
+
 export function cancelBooking(store, reference) {
   const state = stateOf(store);
   const booking = findBookingByReference(store, reference); // throws NOT_FOUND if unknown
-  if (booking.status === 'CANCELLED') {
-    // Refusing a second cancel matters: otherwise seats would be released twice
-    // and the tier would appear to have more seats than it really has.
+  if (booking.status === BookingState.CANCELLED) {
+    // Cancelling twice has its own friendly error (from Build 1). Every OTHER illegal cancel (a refunded
+    // or checked-in booking) is refused by the state machine with INVALID_TRANSITION.
     throw new DomainError(ErrorCode.ALREADY_CANCELLED, `Booking ${booking.reference} is already cancelled`, {
       reference: booking.reference,
     });
   }
-  const tier = state.tiers.get(booking.tierId);
-  tier.sold -= booking.quantity; // release the seats
-  // Keep the record (for support and history) but replace it with a cancelled, frozen copy.
-  const cancelled = Object.freeze({ ...booking, status: 'CANCELLED', cancelledAt: new Date(state.now()).toISOString() });
-  state.bookings.set(referenceKey(booking.reference), cancelled);
+  const cancelled = transitionBooking(store, reference, BookingState.CANCELLED); // releases the seats
 
+  const tier = state.tiers.get(cancelled.tierId);
   // Name the next person waiting. peek() does not remove them from the line.
   const nextInLine = state.waitlists.get(tier.id).peek() ?? null;
   return {

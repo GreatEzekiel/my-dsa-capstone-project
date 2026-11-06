@@ -1,0 +1,18 @@
+/* The landing page. Same palette as the app: navy, cobalt and gold. */
+:root { --ink: #0e1330; --navy: #0b1030; --gold: #ffc83d; --mint: #19c37d; --coral: #f2544b; }
+* { box-sizing: border-box; }
+body {
+  margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 1.5rem;
+  background: radial-gradient(circle at 80% 0%, #3347ff55, transparent 45%), var(--navy);
+  color: #fff; font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+.card { width: min(34rem, 100%); padding: 2rem; border-radius: 1.5rem; background: #ffffff14; border: 1px solid #ffffff22; }
+.eyebrow { margin: 0; color: var(--gold); font-weight: 700; letter-spacing: .2em; text-transform: uppercase; font-size: .75rem; }
+h1 { margin: .25rem 0 1rem; font-size: 2.2rem; line-height: 1.1; }
+.status { display: flex; align-items: center; gap: .6rem; font-weight: 600; }
+.dot { width: .8rem; height: .8rem; border-radius: 50%; background: #ffffff66; }
+.dot.ok { background: var(--mint); box-shadow: 0 0 0 .3rem #19c37d33; }
+.dot.down { background: var(--coral); }
+.hint { color: #ffffffb3; line-height: 1.5; }
+code { background: #ffffff1f; padding: .1rem .35rem; border-radius: .35rem; }
+a { color: var(--gold); }

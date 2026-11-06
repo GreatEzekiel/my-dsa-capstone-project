@@ -7,6 +7,7 @@ import { DomainError } from '../domain/errors.js';
 import { formatMoney } from '../domain/money.js';
 import { searchEvents, SORT_OPTIONS } from '../domain/eventSearch.js';
 import { compareText, mergeSort } from '../domain/sorting.js';
+import { BookingState, canTransition } from '../domain/bookingStateMachine.js';
 import {
   createStore, createEvent, addTier, publishEvent, bookTickets, cancelBooking, findBookingByReference,
   joinWaitlist, leaveWaitlist, takeNextFromWaitlist, listEvents, listEventSummaries, listWaitlist,
@@ -473,14 +474,18 @@ function Waitlists({ store, tiers, onBook, onLeave }) {
   );
 }
 
+// How each booking state is written on screen. (The state itself, like 'checked_in', is data; this is just wording.)
+const STATUS_LABEL = { pending: 'Pending', paid: 'Paid', cancelled: 'Cancelled', refunded: 'Refunded', checked_in: 'Checked in' };
+
 // A booking shown as a ticket: name, details, big reference code, barcode and a cancel button.
 function Pass({ booking, tierName, onCancel }) {
-  const cancelled = booking.status === 'CANCELLED';
+  // A booking that was cancelled or refunded no longer holds seats: show it faded, with a stamp.
+  const cancelled = booking.status === BookingState.CANCELLED || booking.status === BookingState.REFUNDED;
   return (
     <div className="relative animate-rise overflow-hidden rounded-2xl bg-page">
       <div className={`flex items-center justify-between px-5 py-2.5 text-xs font-bold uppercase tracking-widest text-white ${cancelled ? 'bg-ink/60' : 'bg-cobalt'}`}>
         <span>{tierName} ticket</span>
-        <span>{cancelled ? 'Cancelled' : 'Pending'}</span>
+        <span>{STATUS_LABEL[booking.status] ?? booking.status}</span>
       </div>
       <div className={`p-5 ${cancelled ? 'opacity-50' : ''}`}>
         <p className="text-2xl font-extrabold">{booking.customer}</p>
@@ -492,11 +497,12 @@ function Pass({ booking, tierName, onCancel }) {
       {/* Diagonal CANCELLED stamp, shown only for cancelled bookings */}
       {cancelled && (
         <p aria-hidden className="pointer-events-none absolute inset-0 grid place-items-center">
-          <span className="-rotate-12 rounded-lg border-4 border-coral px-4 py-1 text-3xl font-extrabold uppercase tracking-widest text-coral">Cancelled</span>
+          <span className="-rotate-12 rounded-lg border-4 border-coral px-4 py-1 text-3xl font-extrabold uppercase tracking-widest text-coral">{STATUS_LABEL[booking.status]}</span>
         </p>
       )}
       <div className="border-t-2 border-dashed border-ink/15 px-5 py-3">
-        <button className={btnQuiet} disabled={cancelled} onClick={onCancel}>Cancel booking</button>
+        {/* Asks the state machine whether cancelling is allowed from this state (not for cancelled, refunded or checked-in bookings) */}
+        <button className={btnQuiet} disabled={!canTransition(booking.status, BookingState.CANCELLED)} onClick={onCancel}>Cancel booking</button>
       </div>
     </div>
   );

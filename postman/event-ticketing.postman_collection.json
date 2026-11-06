@@ -1,0 +1,769 @@
+{
+  "info": {
+    "name": "Event Ticketing: Build 3 (server skeleton)",
+    "description": "Checks the Build 3 server: /health, JSON errors, static files and path-traversal safety.\n\n1. Start the server:  npm start   (listens on http://localhost:3000)\n2. Import this file, and postman/local.postman_environment.json, into Postman.\n3. Pick the \"Event Ticketing: local\" environment, then Run the collection (Collection Runner). All tests should be green.\n\nEvery request has tests; the collection-level tests check that every error has the shape { error: { code, message } } with no stack trace.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:3000",
+      "type": "string"
+    }
+  ],
+  "event": [
+    {
+      "listen": "test",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "// Runs after EVERY request in this collection.",
+          "pm.test('has a request id (quote it when reporting a problem)', () => pm.expect(pm.response.headers.has('X-Request-Id')).to.be.true);",
+          "if (pm.response.code >= 400) {",
+          "  pm.test('error: exactly { error: { code, message } }', () => {",
+          "    const body = pm.response.json();",
+          "    pm.expect(Object.keys(body)).to.eql(['error']);",
+          "    pm.expect(Object.keys(body.error).sort()).to.eql(['code', 'message']);",
+          "  });",
+          "  pm.test('error: no stack trace reaches the client', () => pm.expect(pm.response.text()).to.not.match(/\\n\\s+at |node:internal|\\.js:\\d+|node_modules/));",
+          "}"
+        ]
+      }
+    }
+  ],
+  "item": [
+    {
+      "name": "1. Health",
+      "item": [
+        {
+          "name": "GET /health",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('body is exactly {\"status\":\"ok\"}', () => pm.expect(pm.response.text()).to.eql('{\"status\":\"ok\"}'));",
+                  "pm.test('content type is JSON', () => pm.expect(pm.response.headers.get('Content-Type')).to.match(/^application\\/json/));",
+                  "pm.test('answer is not cached', () => pm.expect(pm.response.headers.get('Cache-Control')).to.eql('no-store'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/health",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "health"
+              ]
+            },
+            "description": "The required check: the server is up and answers."
+          }
+        },
+        {
+          "name": "HEAD /health",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('no body is sent', () => pm.expect(pm.response.text()).to.eql(''));",
+                  "pm.test('but the length is announced', () => pm.expect(pm.response.headers.get('Content-Length')).to.eql('15'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "HEAD",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/health",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "health"
+              ]
+            },
+            "description": "HEAD is GET without the body."
+          }
+        },
+        {
+          "name": "GET /health with a query string",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('the query string changes nothing', () => { pm.response.to.have.status(200); pm.expect(pm.response.json()).to.eql({ status: 'ok' }); });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/health?x=1",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "health"
+              ],
+              "query": [
+                {
+                  "key": "x",
+                  "value": "1"
+                }
+              ]
+            },
+            "description": ""
+          }
+        },
+        {
+          "name": "GET /health/ (trailing slash)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('a trailing slash is ignored', () => { pm.response.to.have.status(200); pm.expect(pm.response.json().status).to.eql('ok'); });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/health/",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "health",
+                ""
+              ]
+            },
+            "description": ""
+          }
+        }
+      ]
+    },
+    {
+      "name": "2. Errors: one shape, always",
+      "item": [
+        {
+          "name": "Unknown API path -> 404",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 404', () => pm.response.to.have.status(404));",
+                  "pm.test('it is JSON', () => pm.expect(pm.response.headers.get('Content-Type')).to.match(/^application\\/json/));",
+                  "pm.test('code is NOT_FOUND', () => pm.expect(pm.response.json().error.code).to.eql('NOT_FOUND'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/nothing-here",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "nothing-here"
+              ]
+            },
+            "description": "Anything under /api that has no route."
+          }
+        },
+        {
+          "name": "Wrong method -> 405",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 405', () => pm.response.to.have.status(405));",
+                  "pm.test('the Allow header lists what works', () => pm.expect(pm.response.headers.get('Allow')).to.eql('GET, HEAD'));",
+                  "pm.test('code is METHOD_NOT_ALLOWED', () => pm.expect(pm.response.json().error.code).to.eql('METHOD_NOT_ALLOWED'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/health",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "health"
+              ]
+            },
+            "description": "POST to a path that only answers GET."
+          }
+        },
+        {
+          "name": "Bad JSON -> 400",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 400', () => pm.response.to.have.status(400));",
+                  "pm.test('code is BAD_JSON', () => pm.expect(pm.response.json().error.code).to.eql('BAD_JSON'));",
+                  "pm.test('the message does not repeat the body', () => pm.expect(pm.response.text()).to.not.include('\"title\"'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/events",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "events"
+              ]
+            },
+            "description": "The body is cut off in the middle, so it is not valid JSON.",
+            "body": {
+              "mode": "raw",
+              "raw": "{ \"title\": ",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Valid JSON to an unknown API path -> 404",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('the JSON was fine, but there is no such route: 404', () => pm.response.to.have.status(404));",
+                  "pm.test('code is NOT_FOUND', () => pm.expect(pm.response.json().error.code).to.eql('NOT_FOUND'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/events",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "events"
+              ]
+            },
+            "description": "Compare with the request above: same URL, but this body is valid.",
+            "body": {
+              "mode": "raw",
+              "raw": "{ \"title\": \"Lagos Tech Meetup\" }",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Body not sent as JSON -> 415",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 415', () => pm.response.to.have.status(415));",
+                  "pm.test('code is UNSUPPORTED_MEDIA_TYPE', () => pm.expect(pm.response.json().error.code).to.eql('UNSUPPORTED_MEDIA_TYPE'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "text/plain",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/events",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "events"
+              ]
+            },
+            "description": "The header says text/plain, so the server will not read it as JSON.",
+            "body": {
+              "mode": "raw",
+              "raw": "{ \"title\": \"x\" }",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Missing file -> 404 (same JSON shape)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 404', () => pm.response.to.have.status(404));",
+                  "pm.test('code is NOT_FOUND', () => pm.expect(pm.response.json().error.code).to.eql('NOT_FOUND'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/no-such-file.png",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "no-such-file.png"
+              ]
+            },
+            "description": "Even a missing FILE answers with the standard error JSON."
+          }
+        }
+      ]
+    },
+    {
+      "name": "3. Static files",
+      "item": [
+        {
+          "name": "GET / (home page)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('it is HTML', () => pm.expect(pm.response.headers.get('Content-Type')).to.match(/^text\\/html/));",
+                  "pm.test('it is the Event Ticketing page', () => pm.expect(pm.response.text()).to.include('Event Ticketing'));",
+                  "pm.test('the browser may only load things from this server', () => pm.expect(pm.response.headers.get('Content-Security-Policy')).to.include(\"default-src 'self'\"));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                ""
+              ]
+            },
+            "description": ""
+          }
+        },
+        {
+          "name": "GET /styles.css",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('it is CSS', () => pm.expect(pm.response.headers.get('Content-Type')).to.match(/^text\\/css/));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/styles.css",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "styles.css"
+              ]
+            },
+            "description": ""
+          }
+        },
+        {
+          "name": "GET /app.js",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('it is JavaScript', () => pm.expect(pm.response.headers.get('Content-Type')).to.match(/^text\\/javascript/));",
+                  "pm.test('the browser must not guess the type', () => pm.expect(pm.response.headers.get('X-Content-Type-Options')).to.eql('nosniff'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/app.js",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "app.js"
+              ]
+            },
+            "description": ""
+          }
+        },
+        {
+          "name": "GET /favicon.svg",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('it is an SVG image', () => pm.expect(pm.response.headers.get('Content-Type')).to.eql('image/svg+xml'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/favicon.svg",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "favicon.svg"
+              ]
+            },
+            "description": ""
+          }
+        }
+      ]
+    },
+    {
+      "name": "4. Security: files outside public/ stay private",
+      "item": [
+        {
+          "name": "Climb with ..%2f",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('never 200: the file outside public/ is NOT served', () => pm.expect(pm.response.code).to.be.oneOf([400, 404]));",
+                  "pm.test('the project\\'s package.json did not leak', () => pm.expect(pm.response.text()).to.not.include('event-ticketing'));",
+                  "pm.test('the secrets did not leak', () => pm.expect(pm.response.text()).to.not.match(/devDependencies|DATABASE_URL|PASSWORD/));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/..%2f..%2fpackage.json",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "..%2f..%2fpackage.json"
+              ]
+            },
+            "description": "The slash is percent-encoded so a naive check does not see it."
+          }
+        },
+        {
+          "name": "Climb with %2e%2e",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('never 200: the file outside public/ is NOT served', () => pm.expect(pm.response.code).to.be.oneOf([400, 404]));",
+                  "pm.test('the project\\'s package.json did not leak', () => pm.expect(pm.response.text()).to.not.include('event-ticketing'));",
+                  "pm.test('the secrets did not leak', () => pm.expect(pm.response.text()).to.not.match(/devDependencies|DATABASE_URL|PASSWORD/));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/%2e%2e/package.json",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "%2e%2e",
+                "package.json"
+              ]
+            },
+            "description": "The two dots are percent-encoded."
+          }
+        },
+        {
+          "name": "Climb with everything encoded",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('never 200: the file outside public/ is NOT served', () => pm.expect(pm.response.code).to.be.oneOf([400, 404]));",
+                  "pm.test('the project\\'s package.json did not leak', () => pm.expect(pm.response.text()).to.not.include('event-ticketing'));",
+                  "pm.test('the secrets did not leak', () => pm.expect(pm.response.text()).to.not.match(/devDependencies|DATABASE_URL|PASSWORD/));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/%2e%2e%2f%2e%2e%2fpackage.json",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "%2e%2e%2f%2e%2e%2fpackage.json"
+              ]
+            },
+            "description": "Dots and slash both encoded."
+          }
+        },
+        {
+          "name": "Climb with a Windows backslash",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('never 200: the file outside public/ is NOT served', () => pm.expect(pm.response.code).to.be.oneOf([400, 404]));",
+                  "pm.test('the project\\'s package.json did not leak', () => pm.expect(pm.response.text()).to.not.include('event-ticketing'));",
+                  "pm.test('the secrets did not leak', () => pm.expect(pm.response.text()).to.not.match(/devDependencies|DATABASE_URL|PASSWORD/));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/..%5c..%5cpackage.json",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "..%5c..%5cpackage.json"
+              ]
+            },
+            "description": "A backslash, percent-encoded. On Windows it is a folder separator."
+          }
+        },
+        {
+          "name": "Climb with a raw ..",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('never 200: the file outside public/ is NOT served', () => pm.expect(pm.response.code).to.be.oneOf([400, 404]));",
+                  "pm.test('the project\\'s package.json did not leak', () => pm.expect(pm.response.text()).to.not.include('event-ticketing'));",
+                  "pm.test('the secrets did not leak', () => pm.expect(pm.response.text()).to.not.match(/devDependencies|DATABASE_URL|PASSWORD/));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/../../package.json",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "..",
+                "..",
+                "package.json"
+              ]
+            },
+            "description": "Postman or your tool may tidy this to /package.json before sending: that is also a safe 404."
+          }
+        },
+        {
+          "name": "Null byte",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('never 200: the file outside public/ is NOT served', () => pm.expect(pm.response.code).to.be.oneOf([400, 404]));",
+                  "pm.test('the project\\'s package.json did not leak', () => pm.expect(pm.response.text()).to.not.include('event-ticketing'));",
+                  "pm.test('the secrets did not leak', () => pm.expect(pm.response.text()).to.not.match(/devDependencies|DATABASE_URL|PASSWORD/));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/%00",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "%00"
+              ]
+            },
+            "description": "A null byte can cut file names short in some systems."
+          }
+        },
+        {
+          "name": "Hidden file: .env",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('never 200: the file outside public/ is NOT served', () => pm.expect(pm.response.code).to.be.oneOf([400, 404]));",
+                  "pm.test('the project\\'s package.json did not leak', () => pm.expect(pm.response.text()).to.not.include('event-ticketing'));",
+                  "pm.test('the secrets did not leak', () => pm.expect(pm.response.text()).to.not.match(/devDependencies|DATABASE_URL|PASSWORD/));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/.env",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                ".env"
+              ]
+            },
+            "description": "Dotfiles (.env, .git) are never served."
+          }
+        },
+        {
+          "name": "Hidden folder: .git/config",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('never 200: the file outside public/ is NOT served', () => pm.expect(pm.response.code).to.be.oneOf([400, 404]));",
+                  "pm.test('the project\\'s package.json did not leak', () => pm.expect(pm.response.text()).to.not.include('event-ticketing'));",
+                  "pm.test('the secrets did not leak', () => pm.expect(pm.response.text()).to.not.match(/devDependencies|DATABASE_URL|PASSWORD/));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/.git/config",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                ".git",
+                "config"
+              ]
+            },
+            "description": "Same rule for folders that start with a dot."
+          }
+        }
+      ]
+    }
+  ]
+}

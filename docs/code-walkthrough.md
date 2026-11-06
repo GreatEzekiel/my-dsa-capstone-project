@@ -723,3 +723,314 @@ const cities = mergeSort([...new Set(summaries.map((e) => e.city))], compareText
 - `map` takes each event's city; `new Set(...)` removes duplicates; `[...set]` turns it back into an array; `mergeSort` (ours) puts the cities in order for the drop-down.
 
 - `<ul aria-label="Search results">` and `aria-label="Open Abuja Jazz Night"` give screen readers (and the tests) a name for each control. `aria-pressed` marks which event is open.
+
+
+---
+---
+
+# Part 3: Build 3
+
+## 18. `src/domain/bookingStateMachine.js`: the life of a booking, as data
+
+A **state machine** is a list of states plus a list of moves between them. At any moment a booking is in exactly one state, and it can only
+change by following a move on the list.
+
+```js
+export const BookingState = Object.freeze({
+  PENDING: 'pending', PAID: 'paid', CANCELLED: 'cancelled', REFUNDED: 'refunded', CHECKED_IN: 'checked_in',
+});
+export const BOOKING_STATES = Object.freeze(Object.values(BookingState));
+```
+- An object whose **keys** are readable constants (`BookingState.PAID`) and whose **values** are the words stored on a booking (`'paid'`).
+  Writing `BookingState.PAID` instead of the text `'paid'` means a typo (`BookingState.PIAD`) gives `undefined` straight away instead of silently being a new state.
+- `Object.freeze` makes it read-only. `Object.values(...)` lists the five words, so we have the list of all states without typing it twice.
+
+```js
+export const MOVES = Object.freeze([
+  Object.freeze({ from: BookingState.PENDING, to: BookingState.PAID, label: 'payment received' }),
+  ...
+]);
+```
+- **Every allowed move, one line each.** This list is the only place the rules are written. A move that is not on this list does not exist.
+  `label` is a human description, used in the diagram. Each entry is frozen too, so nobody can change a move while the program runs (a test tries).
+
+```js
+export const TRANSITIONS = Object.freeze(Object.fromEntries(
+  BOOKING_STATES.map((state) => [state, Object.freeze(MOVES.filter((m) => m.from === state).map((m) => m.to))]),
+));
+```
+- Builds a **lookup table** from the list: `{ pending: ['paid', 'cancelled'], paid: [...], cancelled: [], ... }`. Read it inside out:
+  for each state, `MOVES.filter(m => m.from === state)` keeps the moves that start there, `.map(m => m.to)` keeps where they lead,
+  and `Object.fromEntries` turns the pairs `[state, destinations]` into an object.
+- Because the table is **built from** `MOVES`, the two can never disagree. A final state simply gets an empty list.
+
+```js
+export const isBookingState = (value) => typeof value === 'string' && Object.hasOwn(TRANSITIONS, value);
+```
+- "Is this one of the five states?" `Object.hasOwn` matters: `TRANSITIONS['toString']` exists on every JavaScript object, so a plain
+  lookup would wrongly accept the text `'toString'` or `'__proto__'` as a state. `hasOwn` only counts the keys we defined.
+
+```js
+export function canTransition(from, to) {
+  return isBookingState(from) && isBookingState(to) && TRANSITIONS[from].includes(to);
+}
+```
+- A **question**: it answers `true` or `false` and **never throws**, whatever you pass in (a number, `undefined`, a made-up state).
+  `&&` stops at the first `false`, so `TRANSITIONS[from]` is only read when `from` really is a state. Staying in the same state is `false`, because no move leads from a state to itself.
+
+```js
+export function assertTransition(from, to) {
+  if (canTransition(from, to)) return;
+  ...
+  throw new DomainError(ErrorCode.INVALID_TRANSITION, message, { from, to, allowed: allowedFrom(from) });
+}
+```
+- An **order**: "this move must be legal; stop everything if it is not". It calls the question first, so the two **cannot disagree**
+  (a test checks that for every pair, including junk values). The long `if / else if` chain only builds a helpful message
+  (`cancelled is final, nothing can leave it`). The error carries `allowed`, the moves that *would* have worked.
+
+```js
+export function bookingStatesToMermaid() { ... }
+```
+- Writes the diagram as text **from the data**. `docs/architecture.md` contains exactly this text, and a test compares the two, so the picture in the document can never drift away from the code.
+
+## 19. `transitionBooking`: the one door (in `inventory.js`)
+
+```js
+export function transitionBooking(store, reference, to) {
+  const booking = findBookingByReference(store, reference);
+  assertTransition(booking.status, to);
+  ...
+```
+- Find the booking (`NOT_FOUND` if the code is unknown), then **ask the state machine before touching anything**. If the move is illegal this
+  throws, and no line below runs. That is "validate first, change state last" again, and it is why a refused move changes nothing.
+
+```js
+const had = holdsSeats(booking.status);
+const will = holdsSeats(to);
+if (had && !will) tier.sold -= booking.quantity;
+if (!had && will) throw new Error('This move would need seats taken back: not implemented');
+```
+- **Seats follow the status.** `pending`, `paid` and `checked_in` hold seats; `cancelled` and `refunded` do not. A move from a holding state to a non-holding one
+  (cancel, refund) gives the seats back **in the same step**. No move in the table goes the other way, so the last line cannot run today;
+  it is a trip-wire: if someone adds such a move later, the program fails loudly instead of quietly breaking the seat count.
+
+```js
+const updated = Object.freeze({ ...booking, status: to, ...(to === 'cancelled' ? { cancelledAt: at } : {}),
+  history: Object.freeze([...booking.history, Object.freeze({ status: to, at })]) });
+state.bookings.set(referenceKey(booking.reference), updated);
+```
+- Bookings are frozen, so we cannot edit one: we build a **new** record. `...booking` copies every field, then `status: to` overrides one.
+  `...(condition ? { cancelledAt: at } : {})` adds a field only when the condition holds (spreading `{}` adds nothing).
+  `history` is the old list plus one new entry: an **audit trail** of every status the booking has had.
+  The new record replaces the old one under the same key. Anyone still holding the old record sees the old status, unchanged.
+
+`cancelBooking` now **uses** `transitionBooking`. One detail: cancelling twice still gives the friendly `ALREADY_CANCELLED` (Build 1's rule),
+while every *other* illegal cancel (a refunded or checked-in booking) gives `INVALID_TRANSITION` from the state machine.
+
+## 20. `src/http/errors.js`: one shape for every error
+
+```js
+export class HttpError extends Error { constructor(status, code, message, headers = {}) { ... } }
+```
+- The HTTP layer's own error: it carries the **status number** (404), a **code word** (`NOT_FOUND`), a message, and optional extra headers (a 405 needs `Allow`).
+
+```js
+export const HTTP_STATUS_BY_DOMAIN_CODE = Object.freeze({ VALIDATION: 400, NOT_FOUND: 404, SOLD_OUT: 409, ... });
+```
+- The **one table** that turns a business rule's code into an HTTP status. 400 = "the request itself is wrong", 404 = "no such thing",
+  409 = "the request is fine, but it clashes with the current state of things" (sold out, illegal move, event started). A test fails if a new domain
+  code is added without a line here, so it can't be forgotten.
+
+```js
+export function describeError(error) {
+  if (error instanceof HttpError) return {...};
+  if (error instanceof DomainError && Object.hasOwn(HTTP_STATUS_BY_DOMAIN_CODE, error.code)) return {...};
+  return { status: 500, body: { error: { code: 'INTERNAL', message: 'Something went wrong' } }, isBug: true };
+}
+```
+- **Every** error in the system goes through this one function, and comes out as `{ error: { code, message } }`. Three cases: our own HTTP error, a business-rule error,
+  and **anything else**, which is a bug. For a bug the client gets a generic sentence only, and `isBug: true` tells the caller to write the real details
+  (message and stack trace) to the **server log**. The client never learns file names, line numbers or secrets.
+
+## 21. `src/http/router.js`: which handler goes with this URL?
+
+```js
+router.get('/events/:id', handler);
+router.match('GET', '/events/42');   // -> { handler, params: { id: '42' }, pattern: '/events/:id' }
+```
+- A route path is split into **segments**: `'/events/:id'` becomes `[ {literal: 'events'}, {param: 'id'} ]`. A segment starting with `:` is a **parameter**: it matches any one piece of the URL and remembers it by name.
+
+```js
+function splitPath(path) {
+  const trimmed = path.length > 1 && path.endsWith('/') ? path.slice(0, -1) : path;
+  return trimmed === '/' ? [] : trimmed.slice(1).split('/');
+}
+```
+- Drops one trailing slash (`/things/` = `/things`), and turns `/` into an empty list. `'/a/b'.slice(1).split('/')` is `['a', 'b']`.
+
+```js
+const params = Object.create(null);
+```
+- An object with **no prototype**. A normal `{}` inherits things like `__proto__` and `constructor`; if a URL contained `/x/__proto__` and we stored it into a normal object we could corrupt every object in the program (*prototype pollution*). With `Object.create(null)` the key `__proto__` is just a key. A test checks it.
+
+```js
+if (!best || route.literalCount > best.route.literalCount) best = { route, params };
+```
+- **Specific beats general.** `/events/new` (one fixed word) wins over `/events/:id` for the URL `/events/new`, whatever order they were registered in.
+
+```js
+const signature = `${upper} /${segments.map((s) => (s.param ? ':' : s.literal)).join('/')}`;
+if (signatures.has(signature)) throw new Error(`Duplicate route ...`);
+```
+- `/a/:id` and `/a/:other` have the same *shape*, so they are the same route. Registering mistakes (no leading slash, bad parameter name, a duplicate) throw **at start-up**, long before any user can trigger them.
+
+`allowedMethods(path)` lists which methods *do* have a route for a path: it is how the server tells a **405** (wrong method) from a **404** (nothing there).
+
+## 22. `src/http/app.js`: what happens to every request
+
+Read `handle(req, res)` from top to bottom; it is the whole story:
+
+```js
+res.setHeader('X-Request-Id', requestId);
+res.on('finish', () => logger.info(`${req.method} ${JSON.stringify(path)} ${res.statusCode} ${ms}ms ${requestId}`));
+```
+- Each request gets a random id, sent back as a header and written in the log line, so "this request failed" can be matched to the server's record of it. The log leaves out the **query string** (it can contain tokens). `JSON.stringify` makes the path safe to print (it escapes control characters).
+
+```js
+const head = req.method === 'HEAD';
+const method = head ? 'GET' : req.method;
+```
+- A HEAD request means "like GET, but send only the headers". We run the GET logic and drop the body at the end.
+
+```js
+const body = await readJsonBody(req, method, maxBodyBytes);
+```
+- The body is read **before** the route is looked up, as most web frameworks do. So broken JSON is a `400` wherever it is sent. `readJsonBody`:
+  1. only POST, PUT and PATCH may carry a body (for others, the bytes are thrown away with `req.resume()`);
+  2. if the client **announces** a size over the limit (`Content-Length`), refuse immediately without reading it (`413`);
+  3. otherwise count the bytes as they arrive (`for await (const chunk of req)`) and stop at the limit, because a client can lie about the size or not send one;
+  4. an empty body is fine ("no body"); a non-empty one must have a JSON `Content-Type` (`415` otherwise);
+  5. `JSON.parse` inside `try/catch`: on failure the answer is a **fixed sentence** (`BAD_JSON`), not the parser's own message, which can quote pieces of the body.
+
+```js
+const found = router.match(method, pathname);
+if (found) { const result = await found.handler({...}); sendJson(res, result.status ?? 200, result.body, ...); return; }
+```
+- A route exists: call its handler with one object (`params`, `query`, `body`...), and send the `{ status, body }` it returns. `await` means a handler can be asynchronous.
+
+```js
+const allowed = router.allowedMethods(pathname);
+if (allowed.length > 0) throw new HttpError(405, ...);          // the path exists, the method does not
+if (isApiPath(pathname)) throw new HttpError(404, ...);         // unknown /api/...: a JSON 404
+if (method !== 'GET') throw new HttpError(405, ...);            // files only answer GET / HEAD
+await files.serve(pathname, res, { head });                     // everything else: a file from public/
+```
+- After "no route", the order of questions matters: wrong method (405), then unknown API path (404), then files.
+
+```js
+} catch (error) {
+  const { status, body, headers, isBug } = describeError(error);
+  if (isBug) logger.error(`${requestId} ... ${error?.stack ?? error}`);
+  if (res.headersSent) { res.destroy(); return; }
+  sendJson(res, status, body, { headers, head });
+}
+```
+- **Anything** that throws, anywhere above, lands here and becomes the standard JSON. A bug's stack trace goes to `logger.error` (the server's log) and never to the client.
+  If the response has already started streaming (`headersSent`) the status can no longer be changed, so the honest thing is to cut the connection.
+
+```js
+const server = http.createServer((req, res) => { handle(req, res).catch((error) => {...}); });
+```
+- `handle` is `async`, so a failure inside it is a rejected promise, which Node would not catch for us. This `.catch` is the safety net under the safety net: the process must never crash because of one request.
+
+```js
+server.on('clientError', (error, socket) => { ... socket.end('HTTP/1.1 400 Bad Request ...' + json) });
+```
+- If a client sends bytes that are not even HTTP, Node answers with its own plain-text 400. We replace it with our JSON, so "every error has the same shape" is true without exception.
+
+```js
+close({ forceAfterMs = 5000 }) { server.close(cb); server.closeIdleConnections(); setTimeout(() => server.closeAllConnections(), forceAfterMs).unref(); }
+```
+- `server.close` alone **waits for every open connection**, and browsers keep connections open ("keep-alive"), so it can hang for a long time. We close the idle ones at once, give busy ones a few seconds, then force-close. `.unref()` means this timer alone won't keep the program alive.
+
+## 23. `src/http/staticFiles.js`: files, and the walls around them
+
+The attack is called **path traversal**: `GET /../../.env` tries to climb out of `public/` and read private files. The defence is **layers**, so one mistake is not enough:
+
+```js
+part = decodeURIComponent(raw);                       // 1. decode FIRST: "%2e%2e" becomes ".."
+if (part.includes('\0') || part.includes('\\') || part.includes('/')) throw badPath();
+if (part === '..') throw badPath();
+if (part.startsWith('.')) throw notFound();           // 2. dotfiles: never served, and not even confirmed to exist
+```
+- Decode **before** checking: checking the raw text would miss every disguised `..`. Null bytes (can cut a file name short in some systems), backslashes (a folder separator on Windows) and `..` are refused outright with a `400`.
+
+```js
+let candidate = path.join(root, ...segments);
+if (!isInside(root, candidate)) throw badPath();      // 3. is the joined path STILL inside public/ ?
+```
+- `isInside` uses `path.relative(parent, child)`: if the relative path starts with `..` the child is outside.
+
+```js
+const real = await realpath(candidate);               // 4. the REAL path, after following every symlink
+if (!isInside(await realRootPromise, real)) throw notFound();
+```
+- A **symlink** is a shortcut. One inside `public/` could point at `/etc/passwd`; steps 1 to 3 would pass because the *name* looks innocent. `realpath` asks the file system where it really leads.
+
+```js
+const stream = createReadStream(file);
+await new Promise((resolve, reject) => { stream.once('open', resolve); stream.once('error', reject); });
+res.writeHead(200, headers);
+await pipeline(stream, res);
+```
+- A file is **streamed** (sent in pieces), so a huge file never sits whole in memory. We wait until it has really opened *before* sending headers, so if opening fails we can still send a proper error. `pipeline` connects the file to the response and cleans up if either side gives up.
+- Headers: `Content-Type` from the extension (the browser relies on it), `X-Content-Type-Options: nosniff` ("believe my Content-Type, don't guess"), and for HTML a `Content-Security-Policy` that only lets the page load things from this same server.
+
+## 24. `src/config.js`, `src/server.js` and `src/services`
+
+```js
+const port = /^\d{1,5}$/.test(text) ? Number(text) : NaN;
+```
+- `parseInt('3000abc')` is `3000`: it silently ignores the junk. A mistyped setting should **stop** the program with a clear message, so PORT must be digits only (then checked for 0 to 65535). `0` is allowed: "any free port", which the tests use.
+
+`server.js` is the **composition root**: the one file that creates things and plugs them together (`config → services → app`). Nothing else creates the world; everything else is *given* what it needs, which is what makes it testable.
+- A bad `PORT` prints one line (`Cannot start: PORT must be...`) and exits with code `1`: no stack trace.
+- `process.once('SIGTERM', ...)`: when you press Ctrl+C or the system asks the program to stop, it finishes the requests in progress and then exits with code `0`.
+
+`healthService.check()` returns a **new** object each call, so nobody can alter the answer the next caller gets. It is a *liveness* check ("the program is up"); a *readiness* check ("and the database works") comes when a database exists.
+
+## 25. The Build 3 tests
+
+- **All 25 moves, one test each** (`for (const from of BOOKING_STATES) for (const to of BOOKING_STATES) test(...)`). With only 5 states, testing *everything* is cheaper than reasoning about which cases to pick. The expected answers are written a **second** time, as a different-shaped list, so a mistake in one has to be repeated in the other to go unnoticed.
+- **The same 20 illegal moves on real bookings**: each one must be refused *and* leave the record, the seats and the history exactly as they were (`assert.equal(after, before)` compares the very same object).
+- **A random walk**: 4,000 random move attempts (a tiny seeded generator, so a failure can be replayed). After **every** step: seats equal the sum of the bookings that hold seats; every history is a legal path; a move succeeded **only** if `canTransition` said yes.
+- **Real network tests**: `startApp()` listens on port `0` (any free port), and the tests call it with `fetch` over a real connection. `rawRequest` uses `http.request` with an exact path, because `fetch` and `new URL()` quietly tidy `/../` away, which would hide the attack being tested.
+- **A control experiment** in the traversal tests: before the 24 attacks, a test proves the secret file exists and an ordinary file is served. Otherwise "every attack failed" might only mean "the server is broken".
+- **The architecture test** reads every `import` line of every file (after stripping comments) and fails if an arrow points the wrong way. That makes the diagram in `architecture.md` *enforced*, not just drawn.
+- **Real process test**: starts `node src/server.js` as a separate program with `PORT=0`, reads its first line to learn the port, calls `/health`, sends `SIGTERM`, and checks the exit code is `0`. It also checks a bad `PORT` and a taken port exit with code `1` and a one-line message.
+- **Mutation checks** (by hand, while building): weaken the code on purpose and make sure a test fails. Result worth knowing: removing **one or two** of the path-traversal defences leaked nothing (the layers cover for each other, as designed); removing **every** defence against climbing leaked, and the tests noticed. One layer, the backslash refusal, can't be seen from outside on Linux (a backslash is just a letter in a file name there), so it has its own test that demands a `400`.
+
+## 26. The Postman collection (`postman/`)
+
+- A collection is a JSON file: folders of requests, each with a `test` script written in JavaScript using `pm.test(name, fn)` and `pm.expect(...)` (Chai-style checks).
+- `{{baseUrl}}` is a **variable**, filled in from the environment, so the same collection works on any port or, later, on a deployed server.
+- A **collection-level** test runs after every request: it checks the `X-Request-Id` header and, for every status of 400 or more, that the body is *exactly* `{ error: { code, message } }` with no stack trace. Per-request tests only need to check the status and the code.
+- The security folder sends the climbing paths and passes only if the answer is `400` or `404` and the project's `package.json` text did not leak.
+- The collection was run with **Newman** (Postman's command-line runner) against the real server: 22 requests, 109 checks, 0 failures. The server log showed that the climbing paths arrived at the server unchanged, so the attacks were real.
+
+## 27. Words from Part 3
+
+| Word | Meaning |
+|------|---------|
+| **State machine** | a list of states and the moves allowed between them; anything not listed is illegal |
+| **Final state** | a state with no moves out: the story is over |
+| **Layer** | a group of code with one job, allowed to call only the layers below it |
+| **Composition root** | the one place where the parts are created and plugged together (`server.js`) |
+| **Route** | a method and a path, with the handler that answers it |
+| **Path traversal** | tricking a server into reading files outside the folder it is meant to serve |
+| **Symlink** | a file that is really a shortcut to another file or folder |
+| **Stream** | sending data in pieces instead of all at once |
+| **HTTP status** | the number that starts a response: 200 ok, 400 your mistake, 404 not found, 409 conflict, 500 our bug |
+| **Request id** | a random label on each request, so the response and the log line can be matched |
+| **Liveness** | "is the program up?" (`/health` today) |

@@ -7,6 +7,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict'; // strict: compares values without sloppy type coercion
 import { Queue } from '../src/domain/waitlistQueue.js';
 import { DomainError } from '../src/domain/errors.js';
+import { holdsSeats } from '../src/domain/bookingStateMachine.js';
 import { referenceKey } from '../src/domain/ids.js';
 import {
   createStore, createEvent, addTier, bookTickets, cancelBooking, findBookingByReference,
@@ -95,11 +96,11 @@ test('returned bookings cannot be tampered with', () => {
   const { store, book } = setup();
   const b = book(1);
   assert.throws(() => { b.status = 'HACKED'; }, TypeError); // frozen: writing throws
-  assert.equal(findBookingByReference(store, b.reference).status, 'PENDING');
+  assert.equal(findBookingByReference(store, b.reference).status, 'pending');
   // cancelling swaps in a new cancelled record
   const res = cancelBooking(store, b.reference);
-  assert.equal(res.booking.status, 'CANCELLED');
-  assert.equal(findBookingByReference(store, b.reference).status, 'CANCELLED');
+  assert.equal(res.booking.status, 'cancelled');
+  assert.equal(findBookingByReference(store, b.reference).status, 'cancelled');
 });
 
 test('the store is sealed: no data to reach into, and fake stores are refused', () => {
@@ -283,7 +284,7 @@ test('invariants hold after random sequences of actions', () => {
     if (directBookingSucceeded) assert.equal(lineBefore, 0, 'a stranger jumped the queue');
 
     // The books must balance: seats sold === seats in bookings that are not cancelled, and never above capacity.
-    const confirmed = listBookings(store, { eventId: event.id }).filter((b) => b.status !== 'CANCELLED'); // PENDING bookings hold seats too
+    const confirmed = listBookings(store, { eventId: event.id }).filter((b) => holdsSeats(b.status)); // pending, paid and checked_in hold seats
     const sold = listEvents(store)[0].tiers[0].sold;
     assert.equal(sold, confirmed.reduce((sum, b) => sum + b.quantity, 0));
     assert.ok(sold >= 0 && sold <= 15);

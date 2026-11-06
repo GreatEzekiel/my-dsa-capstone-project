@@ -7,12 +7,14 @@
     "node": ">=22.13"
   },
   "scripts": {
+    "start": "node src/server.js",
+    "server:dev": "node --watch src/server.js",
     "demo": "node scripts/demo.js",
     "demo:search": "node scripts/demo-search.js",
     "benchmark": "node scripts/benchmark-lookup.js",
     "benchmark:sort": "node scripts/benchmark-sort.js",
-    "test": "npm run test:domain && npm run test:ui",
-    "test:domain": "node --test test/*.test.js",
+    "test": "npm run test:node && npm run test:ui",
+    "test:node": "node --test test/*.test.js",
     "test:ui": "vitest run",
     "dev": "vite",
     "build": "vite build",

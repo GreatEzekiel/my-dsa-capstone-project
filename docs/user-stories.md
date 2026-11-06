@@ -112,6 +112,13 @@ A story is only "done" when every criterion has a passing automated test.
 
 ---
 
+## Build 3: no new stories
+
+Build 3 designed the architecture and the booking life cycle (see [architecture.md](architecture.md)), which S07, S09 and S10
+will be built on. Each of those stories is a move in the state machine: payment is `pending → paid`, a refund is
+`paid → refunded`, and check-in is `paid → checked_in`. The moves are already written down, and illegal ones are already
+refused and tested. The acceptance criteria for those stories are written when each one is built.
+
 ## Stories from earlier work (Build 1 rules, no story number yet)
 
 These rules were built in Build 1 and still have tests in `test/domain.test.js`:
