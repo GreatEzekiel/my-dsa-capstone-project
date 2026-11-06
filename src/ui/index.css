@@ -1,0 +1,48 @@
+/* index.css: Tailwind setup plus the design tokens (colours, fonts, one animation) for the whole UI. */
+
+/* Pulls in Tailwind v4. Utility classes like "p-4" or "text-ink" are generated on demand. */
+@import "tailwindcss";
+
+/* @theme registers our own tokens. Defining --color-ink creates the classes
+   text-ink, bg-ink, border-ink... so every component shares one palette. */
+@theme {
+  --font-sans: "Bricolage Grotesque", ui-sans-serif, system-ui, sans-serif; /* fallback stack if the font fails */
+  --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace; /* booking codes */
+
+  --color-page: #f1f3f9;   /* cool light page background */
+  --color-ink: #0e1330;    /* text */
+  --color-navy: #0b1030;   /* hero and the premium (VIP) ticket */
+  --color-cobalt: #3347ff; /* primary action */
+  --color-gold: #ffc83d;   /* VIP accent and highlights */
+  --color-coral: #f2544b;  /* errors and "sold out" */
+  --color-mint: #0b8f68;   /* success */
+
+  /* A small entrance animation: new items fade up 8px. Used as the class `animate-rise`. */
+  --animate-rise: rise 0.35s ease-out both;
+  @keyframes rise {
+    from { opacity: 0; transform: translateY(8px); }
+    to   { opacity: 1; transform: none; }
+  }
+}
+
+/* Page-wide defaults. @apply reuses Tailwind utilities inside plain CSS. */
+body { @apply bg-page text-ink font-sans antialiased; }
+
+/* A clear keyboard-focus ring on every interactive element (accessibility). */
+:focus-visible { outline: 3px solid var(--color-cobalt); outline-offset: 2px; }
+
+/* Equal-width digits so prices and seat counts don't jiggle as numbers change. */
+.num { font-variant-numeric: tabular-nums; }
+
+/* A fake barcode drawn with a repeating gradient: thick and thin black bars on a transparent background. */
+.barcode {
+  background-image: repeating-linear-gradient(90deg,
+    var(--color-ink) 0 2px, transparent 2px 5px,
+    var(--color-ink) 5px 6px, transparent 6px 8px,
+    var(--color-ink) 8px 11px, transparent 11px 13px);
+}
+
+/* Respect people who ask their device for less motion: switch the animation off. */
+@media (prefers-reduced-motion: reduce) {
+  * { animation: none !important; transition: none !important; }
+}
