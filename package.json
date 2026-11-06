@@ -8,6 +8,7 @@
   },
   "scripts": {
     "start": "node src/server.js",
+    "start:demo": "node src/server.js --demo",
     "server:dev": "node --watch src/server.js",
     "demo": "node scripts/demo.js",
     "demo:search": "node scripts/demo-search.js",

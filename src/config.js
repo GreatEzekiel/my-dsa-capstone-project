@@ -4,6 +4,7 @@
 //
 //   PORT   the port to listen on. Default 3000. 0 means "pick any free port".
 //   HOST   the address to listen on. Default 127.0.0.1 (this computer only). Use 0.0.0.0 inside a container.
+//   DEMO   `true` or `1` (or the flag --demo): start with sample events AND the practice-only booking-transition route.
 
 import { fileURLToPath } from 'node:url';
 
@@ -29,10 +30,17 @@ function readPort(value) {
   return port;
 }
 
+// DEMO / --demo: sample data and the practice-only route. Anything but a clear yes means no.
+function readDemo(value, argv) {
+  return argv.includes('--demo') || ['1', 'true'].includes((value ?? '').trim().toLowerCase());
+}
+
+/** loadConfig(env, argv) -> a frozen settings object. Pass a fake `env` and `argv` in tests. */
 export function loadConfig(env = process.env, argv = process.argv.slice(2)) {
   return Object.freeze({
     port: readPort(env.PORT),
     host: env.HOST?.trim() || DEFAULT_HOST,
+    demo: readDemo(env.DEMO, argv),
     // The folder next to src/: the project's public/ folder, wherever the project is on disk.
     publicDir: fileURLToPath(new URL('../public', import.meta.url)),
     maxBodyBytes: 1_000_000,

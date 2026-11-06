@@ -102,17 +102,18 @@ function sendJson(res, status, body, { headers = {}, head = false, cache = true 
  *
  *   services      what the routes may call (built by createServices)
  *   publicDir     the folder static files are served from
- *   routes        a function (router, services) that registers the routes. Default: the real ones.
+ *   routes        a function (router, services, options) that registers the routes. Default: the real ones.
  *                 Tests pass their own to add a route that fails on purpose.
+ *   devRoutes     true in demo mode: also registers the practice-only routes (see routes.js)
  *   maxBodyBytes  the biggest JSON body accepted (default 1 MB)
  *   logger        { info(text), error(text) }. Default: silent.
  */
-export function createApp({ services, publicDir, routes = registerRoutes, maxBodyBytes = 1_000_000, logger = silentLogger } = {}) {
+export function createApp({ services, publicDir, routes = registerRoutes, devRoutes = false, maxBodyBytes = 1_000_000, logger = silentLogger } = {}) {
   if (!services || typeof services !== 'object') throw new Error('createApp needs a services object');
   if (typeof publicDir !== 'string' || publicDir === '') throw new Error('createApp needs a publicDir');
 
   const router = createRouter();
-  routes(router, services);
+  routes(router, services, { devRoutes });
   const files = createStaticFiles(publicDir);
 
   async function handle(req, res) {

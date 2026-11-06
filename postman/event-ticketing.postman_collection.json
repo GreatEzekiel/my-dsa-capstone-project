@@ -1,7 +1,7 @@
 {
   "info": {
-    "name": "Event Ticketing: Build 3 (server skeleton)",
-    "description": "Checks the Build 3 server: /health, JSON errors, static files and path-traversal safety.\n\n1. Start the server:  npm start   (listens on http://localhost:3000)\n2. Import this file, and postman/local.postman_environment.json, into Postman.\n3. Pick the \"Event Ticketing: local\" environment, then Run the collection (Collection Runner). All tests should be green.\n\nEvery request has tests; the collection-level tests check that every error has the shape { error: { code, message } } with no stack trace.",
+    "name": "Event Ticketing: API and server (Builds 1 to 3)",
+    "description": "POST and GET requests for the Event Ticketing API, with automatic checks on every response.\n\n1. Start the server in DEMO mode:  npm run start:demo   (http://localhost:3000)\n2. Import this file and postman/local.postman_environment.json, choose the \"Event Ticketing: local\" environment.\n3. Run the collection in ORDER (Collection Runner). Folders 2 to 5 pass ids from one request to the next with collection variables, so run them top to bottom. Folder 5 needs demo mode (a normal start answers 404 there).\n\nEvery response is also checked for an X-Request-Id header and, for errors, the exact shape { error: { code, message } } with no stack trace.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
@@ -162,7 +162,2301 @@
       ]
     },
     {
-      "name": "2. Errors: one shape, always",
+      "name": "2. Events: create, add tiers, publish, read (POST + GET)",
+      "item": [
+        {
+          "name": "2.1 POST /api/events: create an event (S02)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// A fresh label for this run, and an event date 30 days from now (17:00 Lagos time).",
+                  "const tag = 'PM' + Date.now().toString(36).toUpperCase();",
+                  "const day = new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10);",
+                  "pm.collectionVariables.set('runTag', tag);",
+                  "pm.collectionVariables.set('startDate', day);",
+                  "pm.collectionVariables.set('startsAt', day + 'T17:00:00+01:00');",
+                  "pm.collectionVariables.set('runTagLower', tag.toLowerCase());"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 201', () => pm.response.to.have.status(201));",
+                  "const event = pm.response.json().event;",
+                  "pm.test('a new id, and the event is a DRAFT', () => { pm.expect(event.id).to.be.a('string'); pm.expect(event.status).to.eql('draft'); });",
+                  "pm.test('Location header points at the new event', () => pm.expect(pm.response.headers.get('Location')).to.eql('/api/events/' + event.id));",
+                  "pm.test('no tiers yet, and no internal fields', () => { pm.expect(event.tiers).to.eql([]); pm.expect(event).to.not.have.property('tierIds'); });",
+                  "pm.collectionVariables.set('eventId', event.id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/events",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "events"
+              ]
+            },
+            "description": "Creates a PRIVATE draft. The pre-request script makes a fresh runTag and a date 30 days away, so you can run this again and again.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"title\": \"Postman Jazz {{runTag}}\",\n  \"city\": \"Postmanville\",\n  \"venue\": \"Collection Hall\",\n  \"startsAt\": \"{{startsAt}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "2.2 GET /api/events/:id: read the draft",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "const event = pm.response.json().event;",
+                  "pm.test('it is the event we created, still a draft', () => { pm.expect(event.id).to.eql(pm.collectionVariables.get('eventId')); pm.expect(event.status).to.eql('draft'); });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/events/{{eventId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "events",
+                "{{eventId}}"
+              ]
+            },
+            "description": "A draft can be read by its id. It is only hidden from the public LIST."
+          }
+        },
+        {
+          "name": "2.3 GET /api/events: the draft is NOT on the public list",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('count is 0: drafts are private', () => pm.expect(pm.response.json()).to.eql({ count: 0, events: [] }));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/events?q={{runTag}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "events"
+              ],
+              "query": [
+                {
+                  "key": "q",
+                  "value": "{{runTag}}"
+                }
+              ]
+            },
+            "description": "Searches for this run's tag. A draft never shows."
+          }
+        },
+        {
+          "name": "2.4 POST /api/events/:id/tiers: add \"General\" (S03)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 201', () => pm.response.to.have.status(201));",
+                  "const tier = pm.response.json().tier;",
+                  "pm.test('saved with 0 sold and 3 seats left', () => { pm.expect(tier.sold).to.eql(0); pm.expect(tier.seatsLeft).to.eql(3); pm.expect(tier.capacity).to.eql(3); });",
+                  "pm.test('the price is a whole number of kobo', () => pm.expect(tier.priceCents).to.eql(500000));",
+                  "pm.collectionVariables.set('tierId', tier.id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/events/{{eventId}}/tiers",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "events",
+                "{{eventId}}",
+                "tiers"
+              ]
+            },
+            "description": "Money is always whole kobo: 500000 = N5,000.00. Capacity 3 makes it easy to sell out later.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"General\",\n  \"priceCents\": 500000,\n  \"capacity\": 3\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "2.5 POST /api/events/:id/tiers: add \"VIP\"",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 201', () => pm.response.to.have.status(201));",
+                  "pm.test('VIP has 1 seat', () => pm.expect(pm.response.json().tier.seatsLeft).to.eql(1));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/events/{{eventId}}/tiers",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "events",
+                "{{eventId}}",
+                "tiers"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"VIP\",\n  \"priceCents\": 2000000,\n  \"capacity\": 1\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "2.6 POST /api/events/:id/publish (S04)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('now published', () => pm.expect(pm.response.json().event.status).to.eql('published'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/events/{{eventId}}/publish",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "events",
+                "{{eventId}}",
+                "publish"
+              ]
+            },
+            "description": "Needs at least one tier (try publishing an event with no tiers: 409 INVALID_STATE)."
+          }
+        },
+        {
+          "name": "2.7 GET /api/events: now it IS on the public list",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('exactly one match', () => pm.expect(body.count).to.eql(1));",
+                  "const found = body.events[0];",
+                  "pm.test('it is our event', () => pm.expect(found.id).to.eql(pm.collectionVariables.get('eventId')));",
+                  "pm.test('the summary shows the CHEAPEST tier and the seats left in ALL tiers', () => { pm.expect(found.minPriceCents).to.eql(500000); pm.expect(found.seatsLeft).to.eql(4); pm.expect(found.tierCount).to.eql(2); });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/events?q={{runTag}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "events"
+              ],
+              "query": [
+                {
+                  "key": "q",
+                  "value": "{{runTag}}"
+                }
+              ]
+            },
+            "description": ""
+          }
+        },
+        {
+          "name": "2.8 GET /api/events/:id: the event with both tiers",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('two tiers, in the order they were added', () => pm.expect(pm.response.json().event.tiers.map((t) => t.name)).to.eql(['General', 'VIP']));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/events/{{eventId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "events",
+                "{{eventId}}"
+              ]
+            },
+            "description": ""
+          }
+        }
+      ]
+    },
+    {
+      "name": "3. Search: filters and sorting (GET)",
+      "item": [
+        {
+          "name": "3.1 Setup: create a second event (later and dearer)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set('startDatePlus', new Date(Date.now() + 40 * 86400000).toISOString().slice(0, 10) + 'T17:00:00+01:00');"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 201', () => pm.response.to.have.status(201));",
+                  "pm.collectionVariables.set('eventB', pm.response.json().event.id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/events",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "events"
+              ]
+            },
+            "description": "Event B starts 40 days away, costs more, and has more seats. That makes the three sort orders DIFFERENT below.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"title\": \"Postman Budget {{runTag}}\",\n  \"city\": \"Postmanville\",\n  \"venue\": \"Second Hall\",\n  \"startsAt\": \"{{startDatePlus}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "3.2 Setup: add a tier to event B",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 201', () => pm.response.to.have.status(201));",
+                  "pm.collectionVariables.set('tierB', pm.response.json().tier.id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/events/{{eventB}}/tiers",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "events",
+                "{{eventB}}",
+                "tiers"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Entry\",\n  \"priceCents\": 900000,\n  \"capacity\": 10\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "3.3 Setup: publish event B",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/events/{{eventB}}/publish",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "events",
+                "{{eventB}}",
+                "publish"
+              ]
+            },
+            "description": ""
+          }
+        },
+        {
+          "name": "3.4 GET ?q=: search by text (capital letters do not matter)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('searched in lower case, and still found both events', () => { pm.expect(pm.collectionVariables.get('runTagLower')).to.not.eql(pm.collectionVariables.get('runTag')); pm.expect(pm.response.json().count).to.eql(2); });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/events?q={{runTagLower}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "events"
+              ],
+              "query": [
+                {
+                  "key": "q",
+                  "value": "{{runTagLower}}"
+                }
+              ]
+            },
+            "description": "The tag is searched in LOWER case (\"pm...\"), but the titles contain it in capitals (\"PM...\"). Matches the title or the venue."
+          }
+        },
+        {
+          "name": "3.5 GET ?q=Jazz <tag>: only the matching title",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('only Postman Jazz', () => { const titles = pm.response.json().events.map((e) => e.title); pm.expect(titles).to.have.lengthOf(1); pm.expect(titles[0]).to.include('Jazz'); });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/events?q=Jazz {{runTag}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "events"
+              ],
+              "query": [
+                {
+                  "key": "q",
+                  "value": "Jazz {{runTag}}"
+                }
+              ]
+            },
+            "description": "Searches for the word Jazz followed by this run's tag, so earlier runs' events can never be counted."
+          }
+        },
+        {
+          "name": "3.6 GET ?city=postmanville: the city (capital letters ignored)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('both events are in Postmanville', () => pm.expect(pm.response.json().events.every((e) => e.city === 'Postmanville')).to.be.true);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/events?city=postmanville&q={{runTag}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "events"
+              ],
+              "query": [
+                {
+                  "key": "city",
+                  "value": "postmanville"
+                },
+                {
+                  "key": "q",
+                  "value": "{{runTag}}"
+                }
+              ]
+            },
+            "description": "City is matched whole and ignoring capitals. The tag keeps this run's events apart from earlier runs'."
+          }
+        },
+        {
+          "name": "3.7 GET ?city=lagos&q=tag: nothing",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('an empty list is a normal 200', () => pm.expect(pm.response.json()).to.eql({ count: 0, events: [] }));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/events?city=lagos&q={{runTag}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "events"
+              ],
+              "query": [
+                {
+                  "key": "city",
+                  "value": "lagos"
+                },
+                {
+                  "key": "q",
+                  "value": "{{runTag}}"
+                }
+              ]
+            },
+            "description": ""
+          }
+        },
+        {
+          "name": "3.8 GET ?maxPriceCents=500000: within the budget",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('only the N5,000 event (event B costs N9,000)', () => { const e = pm.response.json().events; pm.expect(e).to.have.lengthOf(1); pm.expect(e[0].minPriceCents).to.eql(500000); });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/events?maxPriceCents=500000&q={{runTag}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "events"
+              ],
+              "query": [
+                {
+                  "key": "maxPriceCents",
+                  "value": "500000"
+                },
+                {
+                  "key": "q",
+                  "value": "{{runTag}}"
+                }
+              ]
+            },
+            "description": "Compares with the CHEAPEST tier of each event. 500000 itself is allowed."
+          }
+        },
+        {
+          "name": "3.9 GET ?maxPriceCents=499999: just too cheap",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('nothing is that cheap', () => pm.expect(pm.response.json().count).to.eql(0));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/events?maxPriceCents=499999&q={{runTag}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "events"
+              ],
+              "query": [
+                {
+                  "key": "maxPriceCents",
+                  "value": "499999"
+                },
+                {
+                  "key": "q",
+                  "value": "{{runTag}}"
+                }
+              ]
+            },
+            "description": ""
+          }
+        },
+        {
+          "name": "3.10 GET ?from=&to=: a date range (the \"to\" day is included)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('event A (30 days away, 17:00) is inside; event B (40 days) is not', () => { const e = pm.response.json().events; pm.expect(e).to.have.lengthOf(1); pm.expect(e[0].id).to.eql(pm.collectionVariables.get('eventId')); });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/events?from={{startDate}}&to={{startDate}}&q={{runTag}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "events"
+              ],
+              "query": [
+                {
+                  "key": "from",
+                  "value": "{{startDate}}"
+                },
+                {
+                  "key": "to",
+                  "value": "{{startDate}}"
+                },
+                {
+                  "key": "q",
+                  "value": "{{runTag}}"
+                }
+              ]
+            },
+            "description": "A date-only \"to\" means the END of that day, so an event at 5 PM that day is included."
+          }
+        },
+        {
+          "name": "3.11 GET ?sort=date: soonest first",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('A (30 days) before B (40 days)', () => pm.expect(pm.response.json().events.map((e) => e.id)).to.eql([pm.collectionVariables.get('eventId'), pm.collectionVariables.get('eventB')]));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/events?q={{runTag}}&sort=date",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "events"
+              ],
+              "query": [
+                {
+                  "key": "q",
+                  "value": "{{runTag}}"
+                },
+                {
+                  "key": "sort",
+                  "value": "date"
+                }
+              ]
+            },
+            "description": ""
+          }
+        },
+        {
+          "name": "3.12 GET ?sort=price: cheapest first",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('A (N5,000) before B (N9,000)', () => pm.expect(pm.response.json().events.map((e) => e.minPriceCents)).to.eql([500000, 900000]));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/events?q={{runTag}}&sort=price",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "events"
+              ],
+              "query": [
+                {
+                  "key": "q",
+                  "value": "{{runTag}}"
+                },
+                {
+                  "key": "sort",
+                  "value": "price"
+                }
+              ]
+            },
+            "description": ""
+          }
+        },
+        {
+          "name": "3.13 GET ?sort=availability: most seats first",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('B (10 seats) before A (4 seats)', () => pm.expect(pm.response.json().events.map((e) => e.seatsLeft)).to.eql([10, 4]));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/events?q={{runTag}}&sort=availability",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "events"
+              ],
+              "query": [
+                {
+                  "key": "q",
+                  "value": "{{runTag}}"
+                },
+                {
+                  "key": "sort",
+                  "value": "availability"
+                }
+              ]
+            },
+            "description": "Compare with the two requests above: three sorts, three different orders."
+          }
+        },
+        {
+          "name": "3.14 GET ?maxPriceCents=9.99: not a whole number -> 400",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 400', () => pm.response.to.have.status(400));",
+                  "pm.test('code is VALIDATION', () => pm.expect(pm.response.json().error.code).to.eql('VALIDATION'));",
+                  "pm.test('the message says what is wrong', () => pm.expect(pm.response.json().error.message).to.include('maxPriceCents'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/events?maxPriceCents=9.99",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "events"
+              ],
+              "query": [
+                {
+                  "key": "maxPriceCents",
+                  "value": "9.99"
+                }
+              ]
+            },
+            "description": ""
+          }
+        },
+        {
+          "name": "3.15 GET ?to=2026-02-30: not a real date -> 400",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 400', () => pm.response.to.have.status(400));",
+                  "pm.test('code is VALIDATION', () => pm.expect(pm.response.json().error.code).to.eql('VALIDATION'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/events?to=2026-02-30",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "events"
+              ],
+              "query": [
+                {
+                  "key": "to",
+                  "value": "2026-02-30"
+                }
+              ]
+            },
+            "description": "There is no 30 February."
+          }
+        },
+        {
+          "name": "3.16 GET ?sort=popularity: unknown sort -> 400",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 400', () => pm.response.to.have.status(400));",
+                  "pm.test('code is VALIDATION', () => pm.expect(pm.response.json().error.code).to.eql('VALIDATION'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/events?sort=popularity",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "events"
+              ],
+              "query": [
+                {
+                  "key": "sort",
+                  "value": "popularity"
+                }
+              ]
+            },
+            "description": ""
+          }
+        },
+        {
+          "name": "3.17 GET ?citty=Lagos: a typo in an option -> 400",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 400', () => pm.response.to.have.status(400));",
+                  "pm.test('code is VALIDATION', () => pm.expect(pm.response.json().error.code).to.eql('VALIDATION'));",
+                  "pm.test('it names the unknown option', () => pm.expect(pm.response.json().error.message).to.include('citty'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/events?citty=Lagos",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "events"
+              ],
+              "query": [
+                {
+                  "key": "citty",
+                  "value": "Lagos"
+                }
+              ]
+            },
+            "description": "An option that does not exist is refused, so a typo can't silently show everything."
+          }
+        }
+      ]
+    },
+    {
+      "name": "4. Bookings: book, read, cancel (POST + GET)",
+      "item": [
+        {
+          "name": "4.1 POST /api/bookings: book 2 tickets (S06)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 201', () => pm.response.to.have.status(201));",
+                  "const booking = pm.response.json().booking;",
+                  "pm.test('a PENDING booking for 2 seats', () => { pm.expect(booking.status).to.eql('pending'); pm.expect(booking.quantity).to.eql(2); });",
+                  "pm.test('priced in whole cents: 2 x 500000', () => pm.expect(booking.totalCents).to.eql(1000000));",
+                  "pm.test('a readable reference code, like 7K2M-9Q4X', () => pm.expect(booking.reference).to.match(/^[0-9A-Z]{4}-[0-9A-Z]{4}$/));",
+                  "pm.test('Location header points at the booking', () => pm.expect(pm.response.headers.get('Location')).to.eql('/api/bookings/' + booking.reference));",
+                  "pm.collectionVariables.set('reference', booking.reference);",
+                  "pm.collectionVariables.set('referenceLower', booking.reference.toLowerCase());"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/bookings",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "bookings"
+              ]
+            },
+            "description": "The tier has 3 seats, so 1 will be left.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"eventId\": \"{{eventId}}\",\n  \"tierId\": \"{{tierId}}\",\n  \"quantity\": 2,\n  \"customer\": \"Ada Obi\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "4.2 GET /api/bookings/:reference",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('the same booking', () => pm.expect(pm.response.json().booking.reference).to.eql(pm.collectionVariables.get('reference')));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/bookings/{{reference}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "bookings",
+                "{{reference}}"
+              ]
+            },
+            "description": ""
+          }
+        },
+        {
+          "name": "4.3 GET /api/bookings/:reference in lower case",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('capital letters do not matter', () => pm.expect(pm.response.json().booking.reference).to.eql(pm.collectionVariables.get('reference')));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/bookings/{{referenceLower}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "bookings",
+                "{{referenceLower}}"
+              ]
+            },
+            "description": "Codes are read aloud over the phone, so they forgive capitals, spaces and the hyphen."
+          }
+        },
+        {
+          "name": "4.4 GET /api/events/:id: 1 seat left in General",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "const general = pm.response.json().event.tiers.find((t) => t.name === 'General');",
+                  "pm.test('2 sold, 1 left', () => { pm.expect(general.sold).to.eql(2); pm.expect(general.seatsLeft).to.eql(1); });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/events/{{eventId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "events",
+                "{{eventId}}"
+              ]
+            },
+            "description": ""
+          }
+        },
+        {
+          "name": "4.5 POST /api/bookings: 2 more tickets, only 1 left -> 409",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 409', () => pm.response.to.have.status(409));",
+                  "pm.test('code is SOLD_OUT', () => pm.expect(pm.response.json().error.code).to.eql('SOLD_OUT'));",
+                  "pm.test('the message says how many are left', () => pm.expect(pm.response.json().error.message).to.include('Only 1 left'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/bookings",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "bookings"
+              ]
+            },
+            "description": "Nothing changes when a booking is refused.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"eventId\": \"{{eventId}}\",\n  \"tierId\": \"{{tierId}}\",\n  \"quantity\": 2,\n  \"customer\": \"Bola\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "4.6 POST /api/bookings: 0 tickets -> 400",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 400', () => pm.response.to.have.status(400));",
+                  "pm.test('code is VALIDATION', () => pm.expect(pm.response.json().error.code).to.eql('VALIDATION'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/bookings",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "bookings"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"eventId\": \"{{eventId}}\",\n  \"tierId\": \"{{tierId}}\",\n  \"quantity\": 0,\n  \"customer\": \"Bola\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "4.7 POST /api/bookings: \"2\" as text -> 400",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 400', () => pm.response.to.have.status(400));",
+                  "pm.test('code is VALIDATION', () => pm.expect(pm.response.json().error.code).to.eql('VALIDATION'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/bookings",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "bookings"
+              ]
+            },
+            "description": "The quantity must be a JSON NUMBER, not the text \"2\".",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"eventId\": \"{{eventId}}\",\n  \"tierId\": \"{{tierId}}\",\n  \"quantity\": \"2\",\n  \"customer\": \"Bola\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "4.8 POST /api/bookings: 11 tickets -> 400",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 400', () => pm.response.to.have.status(400));",
+                  "pm.test('code is VALIDATION', () => pm.expect(pm.response.json().error.code).to.eql('VALIDATION'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/bookings",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "bookings"
+              ]
+            },
+            "description": "The limit is 10 per booking.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"eventId\": \"{{eventId}}\",\n  \"tierId\": \"{{tierId}}\",\n  \"quantity\": 11,\n  \"customer\": \"Bola\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "4.9 POST /api/bookings: a tier that does not exist -> 404",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 404', () => pm.response.to.have.status(404));",
+                  "pm.test('code is NOT_FOUND', () => pm.expect(pm.response.json().error.code).to.eql('NOT_FOUND'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/bookings",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "bookings"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"eventId\": \"{{eventId}}\",\n  \"tierId\": \"no-such-tier\",\n  \"quantity\": 1,\n  \"customer\": \"Bola\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "4.10 POST /api/bookings: tries to set its own status and price",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 201', () => pm.response.to.have.status(201));",
+                  "const booking = pm.response.json().booking;",
+                  "pm.test('the extra fields were IGNORED: still pending, price worked out by the server', () => { pm.expect(booking.status).to.eql('pending'); pm.expect(booking.totalCents).to.eql(500000); });",
+                  "pm.collectionVariables.set('referenceCheap', booking.reference);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/bookings",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "bookings"
+              ]
+            },
+            "description": "A client may not choose its own status or price. (This takes the last seat, so cancel it in 4.11.)",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"eventId\": \"{{eventId}}\",\n  \"tierId\": \"{{tierId}}\",\n  \"quantity\": 1,\n  \"customer\": \"Sneaky\",\n  \"status\": \"paid\",\n  \"totalCents\": 1\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "4.11 POST /api/bookings/:reference/cancel: the sneaky booking",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/bookings/{{referenceCheap}}/cancel",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "bookings",
+                "{{referenceCheap}}",
+                "cancel"
+              ]
+            },
+            "description": ""
+          }
+        },
+        {
+          "name": "4.12 POST /api/bookings/:reference/cancel: Ada's booking (S06)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('cancelled, with the history recorded', () => { pm.expect(body.booking.status).to.eql('cancelled'); pm.expect(body.booking.history.map((h) => h.status)).to.eql(['pending', 'cancelled']); });",
+                  "pm.test('all 3 seats are free again', () => pm.expect(body.seatsLeft).to.eql(3));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/bookings/{{reference}}/cancel",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "bookings",
+                "{{reference}}",
+                "cancel"
+              ]
+            },
+            "description": ""
+          }
+        },
+        {
+          "name": "4.13 POST /api/bookings/:reference/cancel again -> 409",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 409', () => pm.response.to.have.status(409));",
+                  "pm.test('code is ALREADY_CANCELLED', () => pm.expect(pm.response.json().error.code).to.eql('ALREADY_CANCELLED'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/bookings/{{reference}}/cancel",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "bookings",
+                "{{reference}}",
+                "cancel"
+              ]
+            },
+            "description": "The seats are NOT given back twice."
+          }
+        },
+        {
+          "name": "4.14 GET /api/events/:id: back to 3 seats",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('3 seats left', () => pm.expect(pm.response.json().event.tiers.find((t) => t.name === 'General').seatsLeft).to.eql(3));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/events/{{eventId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "events",
+                "{{eventId}}"
+              ]
+            },
+            "description": ""
+          }
+        },
+        {
+          "name": "4.15 POST /api/events/:id/unpublish: take event B off the list",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('back to draft', () => pm.expect(pm.response.json().event.status).to.eql('draft'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/events/{{eventB}}/unpublish",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "events",
+                "{{eventB}}",
+                "unpublish"
+              ]
+            },
+            "description": ""
+          }
+        },
+        {
+          "name": "4.16 POST /api/bookings: a DRAFT cannot be booked -> 409",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 409', () => pm.response.to.have.status(409));",
+                  "pm.test('code is INVALID_STATE', () => pm.expect(pm.response.json().error.code).to.eql('INVALID_STATE'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/bookings",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "bookings"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"eventId\": \"{{eventB}}\",\n  \"tierId\": \"{{tierB}}\",\n  \"quantity\": 1,\n  \"customer\": \"Bola\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "4.17 POST /api/events/:id/publish: event B is public again",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/events/{{eventB}}/publish",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "events",
+                "{{eventB}}",
+                "publish"
+              ]
+            },
+            "description": ""
+          }
+        }
+      ]
+    },
+    {
+      "name": "5. Booking life cycle (DEMO MODE: npm run start:demo)",
+      "item": [
+        {
+          "name": "5.1 Book 1 ticket",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 201', () => pm.response.to.have.status(201));",
+                  "pm.collectionVariables.set('lc', pm.response.json().booking.reference);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/bookings",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "bookings"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"eventId\": \"{{eventId}}\",\n  \"tierId\": \"{{tierId}}\",\n  \"quantity\": 1,\n  \"customer\": \"Life Cycle\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "5.2 pending -> paid",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('paid', () => pm.expect(pm.response.json().booking.status).to.eql('paid'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/dev/bookings/{{lc}}/transition",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "dev",
+                "bookings",
+                "{{lc}}",
+                "transition"
+              ]
+            },
+            "description": "Needs demo mode: npm run start:demo. In a normal start this URL is a 404.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"to\": \"paid\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "5.3 paid -> checked_in",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('the history is the whole story', () => pm.expect(pm.response.json().booking.history.map((h) => h.status)).to.eql(['pending', 'paid', 'checked_in']));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/dev/bookings/{{lc}}/transition",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "dev",
+                "bookings",
+                "{{lc}}",
+                "transition"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"to\": \"checked_in\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "5.4 checked_in -> cancelled: REFUSED",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 409', () => pm.response.to.have.status(409));",
+                  "pm.test('code is INVALID_TRANSITION', () => pm.expect(pm.response.json().error.code).to.eql('INVALID_TRANSITION'));",
+                  "pm.test('it explains why: checked_in is final', () => pm.expect(pm.response.json().error.message).to.include('final'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/dev/bookings/{{lc}}/transition",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "dev",
+                "bookings",
+                "{{lc}}",
+                "transition"
+              ]
+            },
+            "description": "checked_in is a FINAL state: nothing can leave it.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"to\": \"cancelled\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "5.5 Book another ticket",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 201', () => pm.response.to.have.status(201));",
+                  "pm.collectionVariables.set('lc', pm.response.json().booking.reference);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/bookings",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "bookings"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"eventId\": \"{{eventId}}\",\n  \"tierId\": \"{{tierId}}\",\n  \"quantity\": 1,\n  \"customer\": \"Life Cycle\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "5.6 Cancel it",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('cancelled', () => pm.expect(pm.response.json().booking.status).to.eql('cancelled'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/bookings/{{lc}}/cancel",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "bookings",
+                "{{lc}}",
+                "cancel"
+              ]
+            },
+            "description": ""
+          }
+        },
+        {
+          "name": "5.7 PAY THE CANCELLED BOOKING: REFUSED",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 409', () => pm.response.to.have.status(409));",
+                  "pm.test('code is INVALID_TRANSITION', () => pm.expect(pm.response.json().error.code).to.eql('INVALID_TRANSITION'));",
+                  "pm.test('the exact sentence from the brief', () => pm.expect(pm.response.json().error.message).to.include('cancelled booking cannot become paid'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/dev/bookings/{{lc}}/transition",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "dev",
+                "bookings",
+                "{{lc}}",
+                "transition"
+              ]
+            },
+            "description": "The headline of Build 3: paying a cancelled booking is refused by the state machine.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"to\": \"paid\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "5.8 GET the booking: still cancelled",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('nothing changed', () => pm.expect(pm.response.json().booking.status).to.eql('cancelled'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/bookings/{{lc}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "bookings",
+                "{{lc}}"
+              ]
+            },
+            "description": ""
+          }
+        },
+        {
+          "name": "5.9 Book a third ticket",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 201', () => pm.response.to.have.status(201));",
+                  "pm.collectionVariables.set('lc', pm.response.json().booking.reference);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/bookings",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "bookings"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"eventId\": \"{{eventId}}\",\n  \"tierId\": \"{{tierId}}\",\n  \"quantity\": 1,\n  \"customer\": \"Life Cycle\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "5.10 a state that does not exist: REFUSED",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 409', () => pm.response.to.have.status(409));",
+                  "pm.test('code is INVALID_TRANSITION', () => pm.expect(pm.response.json().error.code).to.eql('INVALID_TRANSITION'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/dev/bookings/{{lc}}/transition",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "dev",
+                "bookings",
+                "{{lc}}",
+                "transition"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"to\": \"teleported\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "5.11 no \"to\" at all -> 400",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 400', () => pm.response.to.have.status(400));",
+                  "pm.test('code is VALIDATION', () => pm.expect(pm.response.json().error.code).to.eql('VALIDATION'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/dev/bookings/{{lc}}/transition",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "dev",
+                "bookings",
+                "{{lc}}",
+                "transition"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "5.12 pending -> paid",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/dev/bookings/{{lc}}/transition",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "dev",
+                "bookings",
+                "{{lc}}",
+                "transition"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"to\": \"paid\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "5.13 paid -> refunded",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('refunded', () => pm.expect(pm.response.json().booking.status).to.eql('refunded'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/dev/bookings/{{lc}}/transition",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "dev",
+                "bookings",
+                "{{lc}}",
+                "transition"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"to\": \"refunded\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "5.14 GET /api/events/:id: the refund gave the seat back",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('2 seats left: one is held by the checked-in booking, the cancelled and refunded ones are free', () => pm.expect(pm.response.json().event.tiers.find((t) => t.name === 'General').seatsLeft).to.eql(2));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/events/{{eventId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "events",
+                "{{eventId}}"
+              ]
+            },
+            "description": ""
+          }
+        }
+      ]
+    },
+    {
+      "name": "6. Errors: one shape, always",
       "item": [
         {
           "name": "Unknown API path -> 404",
@@ -295,16 +2589,16 @@
               }
             ],
             "url": {
-              "raw": "{{baseUrl}}/api/events",
+              "raw": "{{baseUrl}}/api/unknown-thing",
               "host": [
                 "{{baseUrl}}"
               ],
               "path": [
                 "api",
-                "events"
+                "unknown-thing"
               ]
             },
-            "description": "Compare with the request above: same URL, but this body is valid.",
+            "description": "Compare with the Bad JSON request above: this body is valid, and there is no such route, so it is a plain 404. (It uses /api/unknown-thing: /api/events is a real route now.)",
             "body": {
               "mode": "raw",
               "raw": "{ \"title\": \"Lagos Tech Meetup\" }",
@@ -389,11 +2683,243 @@
             },
             "description": "Even a missing FILE answers with the standard error JSON."
           }
+        },
+        {
+          "name": "POST /api/events with no title -> 400",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 400', () => pm.response.to.have.status(400));",
+                  "pm.test('code is VALIDATION', () => pm.expect(pm.response.json().error.code).to.eql('VALIDATION'));",
+                  "pm.test('the message names the field', () => pm.expect(pm.response.json().error.message).to.include('title'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/events",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "events"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"city\": \"Lagos\",\n  \"venue\": \"Hall\",\n  \"startsAt\": \"2026-12-05T18:00:00+01:00\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "POST /api/events with an impossible date -> 400",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 400', () => pm.response.to.have.status(400));",
+                  "pm.test('code is VALIDATION', () => pm.expect(pm.response.json().error.code).to.eql('VALIDATION'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/events",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "events"
+              ]
+            },
+            "description": "There is no 30 February.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"title\": \"x\",\n  \"city\": \"Lagos\",\n  \"venue\": \"Hall\",\n  \"startsAt\": \"2026-02-30\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "POST /api/events with the JSON value null -> 400 (not a crash)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 400', () => pm.response.to.have.status(400));",
+                  "pm.test('code is VALIDATION', () => pm.expect(pm.response.json().error.code).to.eql('VALIDATION'));",
+                  "pm.test('a bad body is the CLIENT\\'s mistake (400), never a server bug (500)', () => pm.expect(pm.response.code).to.not.eql(500));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/events",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "events"
+              ]
+            },
+            "description": "\"null\" is valid JSON. It used to crash the booking and tier code with a 500 before this was tested.",
+            "body": {
+              "mode": "raw",
+              "raw": "null",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "GET /api/events/:id that does not exist -> 404",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 404', () => pm.response.to.have.status(404));",
+                  "pm.test('code is NOT_FOUND', () => pm.expect(pm.response.json().error.code).to.eql('NOT_FOUND'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/events/no-such-event",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "events",
+                "no-such-event"
+              ]
+            },
+            "description": ""
+          }
+        },
+        {
+          "name": "GET /api/bookings/:reference that does not exist -> 404",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 404', () => pm.response.to.have.status(404));",
+                  "pm.test('code is NOT_FOUND', () => pm.expect(pm.response.json().error.code).to.eql('NOT_FOUND'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/bookings/ZZZZ-ZZZZ",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "bookings",
+                "ZZZZ-ZZZZ"
+              ]
+            },
+            "description": ""
+          }
+        },
+        {
+          "name": "GET on a POST-only URL -> 405",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 405', () => pm.response.to.have.status(405));",
+                  "pm.test('code is METHOD_NOT_ALLOWED', () => pm.expect(pm.response.json().error.code).to.eql('METHOD_NOT_ALLOWED'));",
+                  "pm.test('Allow says POST', () => pm.expect(pm.response.headers.get('Allow')).to.eql('POST'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/events/{{eventId}}/publish",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "events",
+                "{{eventId}}",
+                "publish"
+              ]
+            },
+            "description": ""
+          }
         }
       ]
     },
     {
-      "name": "3. Static files",
+      "name": "7. Static files",
       "item": [
         {
           "name": "GET / (home page)",
@@ -517,7 +3043,7 @@
       ]
     },
     {
-      "name": "4. Security: files outside public/ stay private",
+      "name": "8. Security: files outside public/ stay private",
       "item": [
         {
           "name": "Climb with ..%2f",

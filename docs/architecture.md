@@ -25,8 +25,10 @@ flowchart TD
     end
 
     subgraph services["2. Services  ·  src/services"]
+        eventSvc["eventService"]
+        bookingSvc["bookingService"]
         healthSvc["healthService"]
-        later["event, booking and payment services<br/>(later builds)"]
+        later["payment, refund and check-in services<br/>(later builds)"]
     end
 
     subgraph rules["3. Rules  ·  src/domain, pure"]
@@ -66,11 +68,11 @@ flowchart TD
 `sorting.js`, `dates.js`, `money.js`, `ids.js`, `waitlistQueue.js`. Rules that must happen *together with* a data change
 (never sell more seats than exist, people waiting go first) live in `inventory.js`, next to the data they protect.
 When a real database arrives, `inventory.js` splits into repositories (data) and services (the use cases around them).
-The services folder holds one tiny service today (`healthService`); the booking, event and payment services
-arrive with the stories that need them (S07, S09, S10...).
+The services folder holds three services today: `eventService` (create, tiers, publish, search), `bookingService` (book, find, cancel) and `healthService`.
+The payment, refund and check-in services arrive with the stories that need them (S07, S09, S10...).
 
-**The React screen** (`src/ui`) is a separate client. Until the API has event and booking routes, it runs the domain in
-the browser. Once they exist, it will call the HTTP API like any other client, and the domain import goes away.
+**The React screen** (`src/ui`) is a separate client. The API now has event and booking routes, but the screen still runs the domain in
+the browser; switching it to call the HTTP API (and dropping the domain import) is a later step.
 
 **The journey of `GET /health`:** the client sends the request, `app.js` finds the route in the router, the route handler calls
 `services.health.check()`, the service returns `{ status: 'ok' }`, and `app.js` writes it as JSON. If anything throws,
@@ -194,6 +196,9 @@ Built on `node:http` only, with no outside packages.
 | Request | Response |
 |---------|----------|
 | `GET /health` | `200 {"status":"ok"}` |
+| `POST /api/events`, `GET /api/events`, `GET /api/events/:id`, `POST /api/events/:id/tiers\|publish\|unpublish` | the event routes (see [api.md](api.md)) |
+| `POST /api/bookings`, `GET /api/bookings/:reference`, `POST /api/bookings/:reference/cancel` | the booking routes |
+| `POST /api/dev/bookings/:reference/transition` | **demo mode only** (`npm run start:demo`): a practice route for the state machine |
 | any unknown `/api/...` path | `404 {"error":{"code":"NOT_FOUND","message":"..."}}` |
 | a known path with the wrong method | `405` + an `Allow` header |
 | a body that is not valid JSON | `400 {"error":{"code":"BAD_JSON","message":"..."}}` |
@@ -202,6 +207,10 @@ Built on `node:http` only, with no outside packages.
 | any other path | a file from `public/` (`/` serves `public/index.html`), or `404` |
 | any bug on the server | `500 {"error":{"code":"INTERNAL","message":"Something went wrong"}}`, with the stack trace in the **server log only** |
 
+How a `POST /api/bookings` travels: `app.js` reads the JSON body, the router finds the route, the route calls `services.bookings.book(body)`,
+the service calls `bookTickets` (the data layer), which asks the rules (is the event published? are there enough seats? is anyone waiting?).
+A `SOLD_OUT` error travels back up, and `app.js` turns it into `409 {"error":{"code":"SOLD_OUT",...}}`.
+
 **One error shape, everywhere:** `{ "error": { "code": "...", "message": "..." } }`, nothing more, nothing less.
 A domain error maps to an HTTP status through one table (`src/http/errors.js`), for example `VALIDATION` is `400`,
 `NOT_FOUND` is `404`, and every conflict (`SOLD_OUT`, `INVALID_TRANSITION`...) is `409`. A test fails if a new domain error code has no status.
@@ -209,5 +218,5 @@ A domain error maps to an HTTP status through one table (`src/http/errors.js`), 
 **Static files can never escape `public/`:** the path is decoded, checked, resolved against `public/`, and the real path (after symlinks) must still be inside it.
 Encoded `..`, backslashes, null bytes and dotfiles are all refused (tested one by one).
 
-**Configuration** (`src/config.js`): `PORT` (default `3000`; `0` means "any free port"), `HOST` (default `127.0.0.1`).
+**Configuration** (`src/config.js`): `PORT` (default `3000`; `0` means "any free port"), `HOST` (default `127.0.0.1`), and demo mode (`--demo` or `DEMO=true`).
 A bad `PORT` stops the server at start-up with a clear message.

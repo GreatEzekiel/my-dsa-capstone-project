@@ -1,12 +1,16 @@
 // services/index.js
-// Builds every service, once, and hands them out as one object. This is where later builds will pass in the
-// things services need (the data store, the clock, a payment gateway): the services never create those themselves.
+// Builds every service, once, and hands them out as one object. Services never create their own store, clock or
+// anything else they depend on: it is passed in here, which is what lets the tests give them a fresh store each time.
 
+import { createStore } from '../domain/inventory.js';
+import { createBookingService } from './bookingService.js';
+import { createEventService } from './eventService.js';
 import { createHealthService } from './healthService.js';
 
-export function createServices() {
+export function createServices({ store = createStore() } = {}) {
   return Object.freeze({
     health: createHealthService(),
-    // booking, event and payment services arrive with the stories that need them (S07, S09, S10...)
+    events: createEventService({ store }),
+    bookings: createBookingService({ store }),
   });
 }

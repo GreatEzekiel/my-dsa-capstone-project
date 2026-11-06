@@ -1034,3 +1034,157 @@ const port = /^\d{1,5}$/.test(text) ? Number(text) : NaN;
 | **HTTP status** | the number that starts a response: 200 ok, 400 your mistake, 404 not found, 409 conflict, 500 our bug |
 | **Request id** | a random label on each request, so the response and the log line can be matched |
 | **Liveness** | "is the program up?" (`/health` today) |
+
+
+---
+---
+
+# Part 4: the POST and GET API
+
+## 28. How a request reaches the rules: route, service, domain
+
+Follow `POST /api/bookings` all the way down. Each layer does one small thing:
+
+```js
+// src/http/routes.js: the ROUTE
+router.post('/api/bookings', ({ body }) => {
+  const booking = services.bookings.book(body);
+  return created({ booking }, `/api/bookings/${booking.reference}`);
+});
+```
+- `({ body }) => ...` is **destructuring**: the handler receives one object (`method, path, params, query, body...`) and takes only the `body` out of it.
+- The route does exactly three things: take the body, call **one** service function, shape the answer. It decides nothing about seats or prices.
+- `created(body, location)` builds `{ status: 201, body, headers: { Location } }`. **201 Created** says "a new thing now exists", and `Location` says where to find it. A client can follow that address with a `GET`.
+
+```js
+// src/services/bookingService.js: the SERVICE
+book(input) { return bookTickets(store, input); }
+```
+- The service knows nothing about HTTP (no request, no status code). It receives plain data and calls the data layer. `store` is **given** to it when it is built (`createBookingService({ store })`), never created inside, so tests can hand each service a fresh store.
+
+```js
+// src/domain/inventory.js: the DATA and RULES
+const { eventId, tierId, quantity, customer } = asObject(input);
+const tier = getTier(state, id(eventId, 'eventId'), id(tierId, 'tierId'));
+...
+```
+- This is where "is the event published? are there enough seats? is anyone waiting?" is decided. If a rule says no, it throws a `DomainError`; the error travels back **up** through the service and the route to `app.js`, which turns it into `409 { error: { code: 'SOLD_OUT', ... } }`. No route ever has to know that `SOLD_OUT` means 409: that is one table in `src/http/errors.js`.
+
+## 29. `src/services/eventService.js`: turning a URL into a search
+
+```js
+const given = (value) => (value === undefined || value === '' ? undefined : value);
+const toWhole = (value) => (value !== undefined && /^\d+$/.test(value) ? Number(value) : value);
+const toBoolean = (value) => (value === 'true' ? true : value === 'false' ? false : value);
+```
+- Everything in a URL is **text**: `?maxPriceCents=500000` arrives as the text `"500000"`. The search rules want a number, so these three small functions convert.
+- `given`: an empty value (`?city=`) means "not given", like an empty box in a form.
+- `toWhole`: only **digits** become a number (`/^\d+$/` means "digits from start to end"). Anything else (`"9.99"`, `"abc"`, `"-1"`, `"1e3"`) is **left as the text it was**, and the rules refuse it with `VALIDATION`. The service converts types; it does not decide what is valid.
+- `toBoolean` works the same way: `"yes"` stays `"yes"` and is refused.
+
+```js
+for (const key of Object.keys(params)) {
+  if (!SEARCH_KEYS.has(key)) throw new DomainError(ErrorCode.VALIDATION, `${key}: is not a search option. ...`);
+}
+```
+- **An option that does not exist is an error.** Without this, `?citty=Lagos` (a typo) would be silently ignored and the client would get *every* event, and think the filter worked. Refusing loudly turns a quiet mistake into an obvious one.
+
+```js
+const events = searchEvents(listEventSummaries(store), criteria, sort);
+return { count: events.length, events };
+```
+- The service re-uses the pure search functions from Build 2. `listEventSummaries` gives the **published** events only, so a draft can never appear.
+
+```js
+create(input) { const event = createEvent(store, input); return getEventDetails(store, event.id); }
+```
+- `createEvent` returns a bare event; the service returns the **detail view** (with `tiers: []` and `started`), so `POST` and `GET /api/events/:id` answer in the same shape (a test checks they are identical).
+
+## 30. `src/services/bookingService.js`: what the cancel answer leaves out
+
+```js
+cancel(reference) {
+  const { booking, seatsLeft } = cancelBooking(store, reference);
+  return { booking, seatsLeft };
+}
+```
+- `cancelBooking` also knows who is next on the waitlist. The service **drops** that part on purpose: it is another customer's name, and whoever holds a booking reference has no right to it. Choosing what to *leave out* of an answer is a service's job; a test checks the answer has exactly two keys.
+
+```js
+transition(reference, to) {
+  if (typeof to !== 'string' || to === '') throw new DomainError(ErrorCode.VALIDATION, 'to: is required ...');
+  return transitionBooking(store, reference, to);
+}
+```
+- The **practice-only** route. A missing `to` is the client's mistake (`400`); a `to` that is text but not a real state is refused by the state machine (`409 INVALID_TRANSITION`). Two different mistakes, two different answers.
+
+## 31. Demo mode: one flag, two effects
+
+```js
+// config.js
+function readDemo(value, argv) { return argv.includes('--demo') || ['1', 'true'].includes((value ?? '').trim().toLowerCase()); }
+// server.js
+if (config.demo) seedDemoData(store);
+const app = createApp({ ..., devRoutes: config.demo });
+// routes.js
+if (devRoutes) router.post('/api/dev/bookings/:reference/transition', ...);
+```
+- `npm run start:demo` runs `node src/server.js --demo`. The flag does two things: it loads sample events (so `GET /api/events` has something to show), and it **registers** the practice route.
+- In a normal start the route **does not exist at all**: it is not "forbidden", it is simply an unknown path, so the answer is `404`. That is safer than a route that is switched off by an `if` inside it: code that is not there cannot be called. A test checks both modes.
+- `argv` is the list of words after `node src/server.js`. Using a **flag** instead of `DEMO=1 npm start` also works on Windows, where that shell syntax does not.
+
+## 32. Three bugs that real HTTP requests would have caused
+
+The domain was already tested, but a web request can send things a developer's own code never does. Three problems were found while writing the API tests:
+
+**1. A body of `null` crashed the server (a 500).**
+```js
+export function addTier(store, eventId, { name, priceCents, capacity } = {}) { ... }   // before
+```
+`= {}` is a default for a *missing* argument (`undefined`) only. But `null` is **valid JSON**, so a client can send it, and destructuring `null` throws a `TypeError`. Seven functions had this problem.
+```js
+const asObject = (input) => (input !== null && typeof input === 'object' ? input : {});
+const { name, priceCents, capacity } = asObject(input);   // after
+```
+Anything that is not an object (`null`, a number, text, even a list) now counts as "no fields", and the answer is a clean `400 VALIDATION`.
+
+**2. A missing `tierId` said "not found".** `bookTickets(store, {})` answered `NOT_FOUND` (404): "Ticket tier not found", which blames the wrong thing. A **missing** id is the caller's mistake (`400`); only an id that is **there but unknown** is a `404`.
+```js
+function id(value, field) {
+  if (typeof value !== 'string' || value.trim() === '') throw bad(field, 'is required');
+  return value;
+}
+```
+A blank id (`"   "`) counts as missing too. (The first version of this check was inside a callback that never runs when a waiting line is empty; a test caught it, and the check moved above the callback.)
+
+**3. Re-running the Postman collection failed on the second run.** One request searched for `jazz` without this run's tag, so the second run also found the first run's event. The Node tests could never see it, because each test starts with an empty server. Only running the real collection twice against one server showed it. The fix: every search in the collection includes the run's tag.
+
+## 33. Mass assignment: the fields a client may not choose
+
+```js
+const event = { id: newId(), title: text(data.title ?? data.name, 'title'), city: ..., status: EventStatus.DRAFT, tierIds: [] };
+```
+- The domain reads **only the fields it knows** (`title`, `city`, `venue`, `startsAt`) and builds the record itself. A client that sends `"status": "published"` or `"totalCents": 1` or `"id": "hacked"` along with a valid request gets those extra fields **ignored**. (The opposite design, copying the whole body into the record, is a classic security hole called *mass assignment*: a customer could set their own price.)
+- Tests send the extra fields and check the saved record has the server's values. Postman request 4.10 shows the same thing with a booking.
+
+## 34. The Postman collection that chains requests
+
+```js
+const event = pm.response.json().event;
+pm.collectionVariables.set('eventId', event.id);
+```
+- A **collection variable** is a named value that lives for the whole run. Request 2.1 saves the new event's id; request 2.4's URL is `{{baseUrl}}/api/events/{{eventId}}/tiers`, and Postman fills in `{{eventId}}` just before sending. That is how a chain of requests (create, add a tier, publish, book, cancel) works without you copying ids by hand.
+
+```js
+const tag = 'PM' + Date.now().toString(36).toUpperCase();
+pm.collectionVariables.set('runTag', tag);
+pm.collectionVariables.set('startsAt', day + 'T17:00:00+01:00');
+```
+- This is a **pre-request script** (it runs *before* the request is sent). It makes a new label for this run and a date 30 days away. The label goes into the event title, and every search uses it (`?q={{runTag}}`), so **each run only sees its own events**, however many runs came before. Without it the collection would pass once and fail on the next run.
+
+```js
+pm.test('2 sold, 1 left', () => { pm.expect(general.sold).to.eql(2); pm.expect(general.seatsLeft).to.eql(1); });
+```
+- `pm.test(name, fn)` is one check; `pm.expect(value).to.eql(expected)` compares. A check fails if `fn` throws.
+- The collection tests the **failures** as carefully as the successes (a bad quantity, a sold-out tier, a cancelled booking being paid), because errors are where bugs hide.
+- **How it was verified:** Newman (Postman's command-line runner) ran the collection **four times in a row against one server**: 84 requests, 345 assertions, 0 failures, 0 server errors. Against a normal (non-demo) server folder 5 failed on purpose, which proved the collection can fail.

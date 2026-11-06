@@ -223,3 +223,69 @@ That is exactly what defence in depth means, and it is why one test per layer wo
 5. **Out of scope on purpose:** HTTPS, logins, rate limiting, CORS (Postman and same-origin pages do not need it). Each will need a decision later.
 6. **Windows:** the symlink tests skip themselves where symlinks can't be created, and the backslash defence is only *observable* there. The explicit-400 tests cover it on every system.
 7. **Carried over:** started events still appear on the public list; "cheapest tier" includes sold-out tiers; identity is still just a name.
+
+---
+---
+
+# Build 3, part 2: the POST and GET API, and its Postman collection
+
+Added after Build 3: real `POST` and `GET` requests for events, tiers, publishing, search and bookings, and a Postman collection that chains them.
+Same rule: read it, run it, try to break it.
+
+## Checks I ran
+
+| Check | How | Result |
+|-------|-----|--------|
+| Every endpoint, over real HTTP | `test/api-events.test.js` (40), `test/api-bookings.test.js` (26), `test/api-dev.test.js` (33), plus service tests | Pass |
+| Look **behind** the API | after a request, the tests read the store directly: a rejected request must have saved nothing | Pass |
+| **No overselling** | 20 parallel `POST /api/bookings` for 5 seats; then 8 parallel bookings of different sizes | Exactly 5 succeeded, 15 `SOLD_OUT`, 0 seats left, never more than the capacity |
+| All 25 life-cycle moves **over HTTP** | the practice route, one test per (from, to) pair | 5 succeed, 20 give `409 INVALID_TRANSITION` and change nothing |
+| Fields a client must not choose | `id`, `status`, `totalCents`, `reference`, `sold`, `tiers`... sent along with valid requests | All ignored |
+| Deliberate bugs | 11 mutations of the routes, services and domain (201 to 200, no `Location`, practice route always on, unknown options accepted, cancel reveals the waitlist, sort ignored, drafts public, capacity check removed, `tierIds` leaked, blank ids, `null` crash) | Each made at least one test fail (see M1) |
+| Postman collection | **Newman**, against the real server in demo mode, **four runs in a row** | 84 requests, 345 assertions, 0 failures, 0 server errors |
+| Can the collection fail? | Newman against a **normal** server: folders 1 to 4 and 6 to 8 pass (297 assertions); folder 5 fails with 404 | Yes, as it should |
+| The whole suite | `npm test` | **434 Node tests + 13 UI tests**, all pass |
+| The Postman **app** and the React screen | I cannot open either in my sandbox | **Not checked by eye.** Newman ran the same scripts, but open the collection in Postman and click through it |
+
+## Problems found and fixed
+
+| # | Where | What was wrong | How it was found | Fix |
+|---|-------|----------------|------------------|-----|
+| A1 | `inventory.js` | **A request body of `null` crashed the server with a `TypeError` (a 500)** in seven functions (`createStore`, `addTier`, `bookTickets`, `joinWaitlist`, `leaveWaitlist`, `listEventSummaries`, `listBookings`). A default of `= {}` only covers `undefined`, and `null` is valid JSON. Build 1 and 2 tests never sent `null`, because their own code never does. | Probing every function with `null` before writing the routes | `asObject(input)`: anything that is not an object counts as "no fields". Tests for `null`, numbers, text, `true` and lists |
+| A2 | `inventory.js` | A missing `tierId` or `eventId` answered `NOT_FOUND` (404, "Ticket tier not found"): the wrong thing is blamed. | The same probe: `bookTickets(null)` said `NOT_FOUND` | A missing or blank id is `VALIDATION` (400); only an id that is present but unknown is `NOT_FOUND` (404) |
+| A3 | `leaveWaitlist` | My fix for A2 put the `entryId` check inside a callback that never runs on an **empty** line, so a missing `entryId` still said `NOT_FOUND`. | The new test for A2 failed | The check moved above the callback |
+| A4 | `inventory.js` | A blank id (`"   "`) counted as "present", so it gave 404 instead of 400. | `test/api-bookings.test.js` failed | Blank counts as missing |
+| A5 | Event status words | Events used `DRAFT` / `PUBLISHED` (capitals) while bookings use lower-case words, and my own ER diagram already said "draft or published". The API would have shown both spellings. | Writing the API responses | One constant, `EventStatus` (`'draft'`, `'published'`), used everywhere; earlier tests updated |
+| A6 | Postman collection | **It passed on the first run and failed on every later run.** Request 3.5 searched for `jazz` in `postmanville` without this run's tag, so the second run also found the first run's event (the failing assertion said "expected a length of 1 but got 2"). | Running the collection a second time. The Node tests could not see it: each test starts with an empty server | Every search carries the run's tag; also 3.6. Then four runs in a row, all green |
+| A7 | Postman collection | "3.4 also found in lower case" asserted something that did not test lower case at all: a hollow check that could never fail. | Reading my own assertion while checking the folder | 3.4 now really searches the tag in lower case (`runTagLower`) and checks both events are still found |
+| A8 | Postman collection | The old request "valid JSON to an unknown API path" posted to `/api/events`, which is a **real route now**, so it would have answered 400, not 404. | Re-reading the Build 3 collection against the new routes | It uses `/api/unknown-thing` |
+
+## Mutation checks on the API (M1)
+
+Eleven deliberate bugs, each caught: *create answers 200 instead of 201* (2 tests fail), *no `Location` header on a booking* (2), *practice route always on* (2),
+*unknown search options accepted* (3), *cancel reveals the next person in line* (2), *search ignores the sort* (3), *drafts shown on the public list* (14),
+*capacity check removed* (4), *`tierIds` leaked in an event* (1), *blank ids count as present* (2), *`null` crashes `bookTickets` again* (2).
+One line first printed "0 failing" for the blank-ids mutation: my edit pattern did not match the file, so nothing was changed; the corrected mutation failed 2 tests.
+
+A second false alarm of the same kind: after the collection's second run failed, the server log looked like it had stopped after run 1. I checked for a crash (0 errors, no stack traces) and found the sandbox had removed my background server between commands, so run 2 was "connection refused", not a bug. I then ran the server and all runs in **one** command, which is how A6 was found.
+
+## Decisions I made (change them if your class decides otherwise)
+
+- **No logins yet, so anyone can create, publish, unpublish and cancel.** The API is for learning on your own computer (it listens on `127.0.0.1` by default). Real use needs users and permissions first.
+- **A draft can be read by its id** (`GET /api/events/:id`). It is hidden from the **list**, not secret: an organizer needs to see it, and there are no users yet to decide who. The id is a long random value.
+- **A booking reference is the only thing protecting a booking's details.** There is no rate limiting, so a determined guesser could try codes (the code has 40 bits, so a blind guess is very unlikely, but there is no lock-out). Rate limiting is a later decision.
+- **Cancelling does not reveal the waitlist** (another customer's name is private), although the domain function knows it.
+- **The practice route exists only in demo mode** (`npm run start:demo`). A public "mark as paid" route would let anyone pay nothing. The real S07, S09 and S10 will replace it.
+- **Unknown search options are an error**, not ignored. A typo like `?citty=Lagos` would otherwise show everything.
+- **No paging.** The whole list is returned.
+- **`201 Created` + `Location`** for events and bookings; tiers get `201` without a `Location` (a tier has no URL of its own yet).
+- **Bad JSON is still a 400 even for a URL with no route**, as in Build 3.
+- **The data is in memory:** lost when the server stops, so Postman variables (`eventId`...) from before a restart no longer point at anything. Run the collection again from the top.
+
+## What is NOT finished
+
+1. **Not looked at by eye:** the Postman app itself (Newman ran the identical collection), the landing page, and the React screen.
+2. **The React screen still runs the domain inside the browser**; it does not call these routes yet.
+3. **No waitlist routes**, so `WAITLIST_FIRST`, `ALREADY_WAITING` and `SEATS_AVAILABLE` can't happen over HTTP yet (they are tested in the domain).
+4. **No paging, no logins, no rate limiting, no CORS, no database.**
+5. **Carried over:** started events still appear on the public list; "cheapest tier" includes sold-out tiers; identity is a name.

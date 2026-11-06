@@ -12,6 +12,8 @@ The rules of an event ticketing system, built from an empty folder.
   such as paying a cancelled booking; and a **web server** on `node:http` that answers `/health`, returns JSON errors in one
   shape, and serves static files from `public/` without ever letting a request escape that folder. Test it with **Postman**
   (`docs/postman.md`).
+- **The API (POST and GET):** create events, add tiers, publish, search/filter/sort, book tickets, read and cancel bookings, all over HTTP
+  (`docs/api.md`), with a Postman collection of 84 requests whose tests chain the requests together.
 
 - **The domain core** is plain JavaScript (ES modules, Node 22.13+, no runtime packages) and runs in the terminal.
   No server, no database.
@@ -30,6 +32,7 @@ npm run benchmark      # Map.get vs Array.find (lookup by reference code)
 npm run benchmark:sort # our merge sort O(n log n) vs insertion sort O(n squared)
 
 npm start              # Build 3: the web server on http://localhost:3000  (PORT=3001 npm start for another port)
+npm run start:demo     # the same, plus 4 sample events and the practice-only booking-transition route (needed by Postman folder 5)
                        #   try http://localhost:3000/health  and  http://localhost:3000/
 
 npm test               # EVERY test: the Node tests (domain, HTTP, security, architecture), then the UI tests
@@ -56,11 +59,12 @@ src/
   http/                    LAYER 1, routes: the web plumbing (no business rules)
     app.js                 the server: body reading, routing, errors, static files
     router.js              method + path with :params
-    routes.js              the URLs the server answers (today: GET /health)
+    routes.js              the URLs the server answers: /health, events, search, bookings (see docs/api.md)
     errors.js              HttpError + ONE error shape + domain code -> HTTP status table
     staticFiles.js         files from public/, with path-traversal defences
-  services/                LAYER 2, services: one use case each (today: health)
-    healthService.js  index.js
+  services/                LAYER 2, services: the use cases, no HTTP
+    healthService.js  eventService.js  bookingService.js  index.js
+    demoData.js            sample events for `npm run start:demo`
   domain/                  LAYERS 3 and 4: the rules (pure) and the data
     errors.js              DomainError + the list of error codes
     bookingStateMachine.js the booking life cycle as DATA: states, allowed moves, canTransition, assertTransition
@@ -68,7 +72,7 @@ src/
     inventory.js           the data: in-memory store + events, tiers, publishing, bookings, transitionBooking, waitlist
   ui/                      the React screen (search panel + event page)
 public/                    files the server serves: index.html, styles.css, app.js, favicon.svg
-postman/                   the Postman collection + environment
+postman/                   the Postman collection (84 requests) + environment
 scripts/                   demo.js  demo-search.js  benchmark-lookup.js  benchmark-sort.js
 test/
   helpers.js  http-helpers.js         shared test tools (deepFreeze, code(), a real server, raw requests, a temp site)
@@ -76,12 +80,14 @@ test/
   booking-lifecycle.test.js           the state machine on REAL bookings + 4,000 random moves
   router.test.js  http.test.js  static.test.js  config.test.js  services.test.js
   server-process.test.js              starts the real `node src/server.js` and calls /health
+  api-events.test.js  api-bookings.test.js  api-dev.test.js   the POST and GET routes over real HTTP (events, search, bookings, life cycle)
   architecture.test.js                "nothing calls upwards", checked from the imports
   domain.test.js  dates.test.js  sorting.test.js  s02..s06 story tests  error-codes.test.js
   ui/app.test.jsx                     the real screen in a fake browser (Vitest)
 docs/
   architecture.md          THE THREE DIAGRAMS: layers, data model, booking life cycle
-  postman.md               how to test the server with Postman
+  api.md                   every POST and GET request, with examples and error codes
+  postman.md               how to test the API with Postman
   build-2.md  build-3.md   the briefs and how to check "Done when"
   user-stories.md          the backlog: stories + acceptance criteria + definition of done
   code-walkthrough.md      every snippet explained in plain language (start here to learn)
@@ -346,6 +352,26 @@ HOST=0.0.0.0 npm start         # reachable from other computers / containers (de
 | dotfiles, folders without `index.html`, missing files, symlinks leading out | `404` |
 | a bug on the server | `500 {"error":{"code":"INTERNAL","message":"Something went wrong"}}`; the stack trace goes to the **server log only** |
 
+### The API (POST and GET), in one table
+
+| Request | What it does |
+|---------|--------------|
+| `POST /api/events` | create an event: a private **draft** (`201` + `Location`) |
+| `GET  /api/events` | search the **published** events: `?q=` `?city=` `?from=` `?to=` `?maxPriceCents=` `?onlyAvailable=` `?sort=date\|price\|availability` |
+| `GET  /api/events/:id` | one event with its tiers and seats left |
+| `POST /api/events/:id/tiers` | add a ticket tier |
+| `POST /api/events/:id/publish` / `unpublish` | make it public / take it off the list |
+| `POST /api/bookings` | book tickets (`201`, `pending`); `409 SOLD_OUT` when there are not enough seats |
+| `GET  /api/bookings/:reference` | find a booking by its code |
+| `POST /api/bookings/:reference/cancel` | cancel it and give the seats back |
+| `POST /api/dev/bookings/:reference/transition` | **demo mode only**: move a booking along its life cycle (shows the state machine refusing illegal moves) |
+
+Full examples, error codes and rules for every request are in `docs/api.md`.
+The routes only call the services (`eventService`, `bookingService`), which call the rules and the data: the same layers as before.
+Safety rules worth knowing: a client **cannot choose** `id`, `status`, `totalCents`, `reference` or `sold` (they are ignored); a request body of
+`null`, a list or a number is a `400`, never a crash; an unknown search option is a `400` so a typo can't silently show everything;
+and 20 requests booking the last 5 seats at once get exactly 5 bookings (tested).
+
 - **One error shape:** `{ "error": { "code", "message" } }`, for every error, even a request that is not valid HTTP.
 - **Business-rule errors become HTTP statuses through one table** (`src/http/errors.js`): `VALIDATION` is 400, `NOT_FOUND` is 404, everything else (sold out, illegal transition...) is 409. A test fails if a new error code has no status.
 - **Static files can't escape `public/`:** four layers (decode then refuse `..`, backslash and null byte; refuse dotfiles; check the joined path is inside; check the *real* path after symlinks is inside). Tests try 24 disguises, and "mutation" checks confirmed that removing one or two layers still blocks the attacks, while removing every climbing defence leaks (and the tests notice).
@@ -355,7 +381,8 @@ HOST=0.0.0.0 npm start         # reachable from other computers / containers (de
 
 ### Testing with Postman
 `docs/postman.md` has the steps. Import `postman/event-ticketing.postman_collection.json` and `postman/local.postman_environment.json`,
-start the server, and run the collection: 22 requests, 109 checks, all green.
+start the server in **demo mode** (`npm run start:demo`), and run the collection top to bottom: **84 requests, 345 checks, all green**, re-runnable (four runs in a row, same server).
+The requests are mostly **POST** (create an event, add tiers, publish, book, cancel) and **GET** (read, search, filter, sort); each saves ids for the next one.
 
 ---
 
@@ -403,7 +430,7 @@ Make small, focused commits (for example one per file or rule), so the history t
 - [ ] `docs/architecture.md` has the three diagrams (layers, data model, booking states) and the sentence for each layer
 - [ ] Illegal booking moves (for example paying a cancelled booking) are refused by tests: `test/booking-state-machine.test.js`, `test/booking-lifecycle.test.js`
 - [ ] `npm start`, then http://localhost:3000/health shows `{"status":"ok"}`
-- [ ] The Postman collection runs green (`docs/postman.md`)
+- [ ] The Postman collection runs green (`docs/postman.md`), including the POST and GET requests for events, search and bookings (`docs/api.md`)
 - [ ] `npm run demo:search` shows search, filter and sort, and "the original list was never changed: true"
 - [ ] `npm run benchmark:sort` shows merge sort growing about 2x per doubling and insertion sort about 4x
 - [ ] Every story in `docs/user-stories.md` has acceptance criteria, and **S04's are your class's own**
@@ -421,7 +448,9 @@ Make small, focused commits (for example one per file or rule), so the history t
 | `npm run test:ui` says a package is missing | Run `npm install` (Vitest, jsdom and Testing Library are dev dependencies) |
 | `Cannot start: PORT must be a whole number...` | `PORT` is not a number from 0 to 65535 | `PORT=3001 npm start` |
 | `Cannot start: port 3000 is already in use` | Another program (or another copy of the server) is using the port | Stop it, or use `PORT=3001 npm start` |
-| Postman says `ECONNREFUSED` | The server is not running | `npm start` in another terminal |
+| Postman says `ECONNREFUSED` | The server is not running | `npm run start:demo` in another terminal |
+| Postman folder 5 is all `404` | The server was not started in demo mode | `npm run start:demo` |
+| A Postman request fails and its URL contains `{{eventId}}` | You ran it before the request that saves that id | Run the whole collection from the top |
 | A booking says `INVALID_TRANSITION` | The move is not on the state diagram (for example paying a cancelled booking) | See `docs/architecture.md`, section 3 |
 | A booking says `EVENT_STARTED` | The event's start time has passed. Use a future date in `startsAt` |
 | `npm run dev` page is unstyled | Make sure `src/ui/index.css` is imported in `main.jsx` and `@tailwindcss/vite` is in `vite.config.js` |

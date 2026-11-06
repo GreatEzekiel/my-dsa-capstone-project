@@ -441,6 +441,13 @@ export function listEvents(store) {
   return [...state.events.values()].map((event) => detailsOf(state, event));
 }
 
+// ONE event with its tiers, found by id in O(1). NOT_FOUND if there is no such event.
+// (A draft can be read by id: drafts are hidden from the public LIST, they are not secret. Real privacy needs users.)
+export function getEventDetails(store, eventId) {
+  const state = stateOf(store);
+  return detailsOf(state, getEvent(state, eventId));
+}
+
 // The waiting line as an array, front first. O(n): fine for display.
 export const listWaitlist = (store, tierId) => [...(stateOf(store).waitlists.get(tierId) ?? [])];
 

@@ -25,5 +25,6 @@ No new stories. The booking state machine designed here is what S07, S09 and S10
 | The server starts and `/health` responds | `npm start`, then open http://localhost:3000/health | `src/server.js` |
 | ...and a test does it for you | one test starts the real program, calls `/health`, and stops it | `test/server-process.test.js`, `test/http.test.js` |
 | Testing with Postman | import the files in `postman/` | [postman.md](postman.md) |
+| POST and GET requests in Postman | 84 requests: create, search, book, cancel, the life cycle | [api.md](api.md), [postman.md](postman.md) |
 
 Also: [code-walkthrough.md](code-walkthrough.md) (Part 3 explains this build line by line) and [ai-log.md](ai-log.md).
