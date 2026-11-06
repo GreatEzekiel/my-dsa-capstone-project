@@ -10,6 +10,6 @@ export default defineConfig({
   plugins: [react(), tailwindcss()],
   test: {
     environment: 'jsdom', // a fake browser inside Node, so React can render and be clicked in tests
-    include: ['tests/ui/**/*.test.jsx'], // only UI tests; the domain tests use node:test instead
+    include: ['test/ui/**/*.test.jsx'], // only UI tests; the domain tests use node:test instead
   },
 });

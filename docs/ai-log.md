@@ -63,3 +63,65 @@ one honest limit at the very end.
 Identity is just a **name**. "Ada Obi" typed twice is the same person, but two different people who happen to share a
 name would be treated as one, and nothing stops someone using a different name to join twice. Real identity needs
 accounts, which is outside Build 1. Decide it in Build 2.
+
+---
+---
+
+# Build 2: search, sorting, backlog, first tests
+
+Same rule as Build 1: read it, run it, try to break it. The brief says "when it answers, do not trust it yet".
+
+## Checks I ran
+
+| Check | How | Result |
+|-------|-----|--------|
+| Every acceptance criterion has a test | S02 (2 criteria), S03 (3), S05 (7), S06 (3), S04 (3 **proposed**), tests named `S0x: ...` | Pass |
+| Merge sort correct and stable | 300 random lists with many ties compared with the built-in sort (used only as an oracle in the test) | Identical |
+| The built-in sort is not used | The test replaces `Array.prototype.sort` with a function that throws, and another test reads the source | Pass |
+| Input never changed | The search tests pass in a **deep-frozen** list: any write would throw | Pass |
+| Every error code reachable | `test/error-codes.test.js` triggers all 9 for real and fails if a new code has no trigger | Pass |
+| **Do the tests catch bugs?** | I broke the code on purpose 11 ways (merge ties, inclusive `to`, end-of-day, price filter, city match, status, publish rule, public list, 30 February, price cap, swapped order) | Every one made at least one test fail (see F2 below for one that first looked like it survived) |
+| Sort speed | `npm run benchmark:sort` | Insertion sort about 4x per doubling, merge sort a little over 2x, and ns per n log n stays flat |
+| UI | `npm run test:ui`: 13 tests, including search, city, price, dates, errors, opening another event and booking there | Pass |
+| Whole suite | `npm test` | Domain tests and UI tests pass |
+| UI look | I cannot see a screen in my sandbox | **Not checked by eye.** Open `npm run dev`, try the search panel, and check it at phone width |
+
+## Problems found and fixed
+
+| # | Where | What was wrong | How it was found | Fix |
+|---|-------|----------------|------------------|-----|
+| B1 | Build 1 `createEvent` | It checked dates with `Date.parse`, which **accepts 30 February** (it rolls over to 2 March). S02 says a date that is not real must be rejected. | Ran `Date.parse('2026-02-30')` in Node: it returned a number | New `dates.js` with a strict ISO parser and a round-trip check. Tests for 30 February, 29 February in non-leap years, month 13, hour 24 |
+| B2 | Dates in general | `Date.parse` reads a time **with no zone** in the computer's own zone, so the same event would sit at different instants on different computers, and a date filter would give different results. | Reading the date rules against the "5 PM on 5 December, up to 2026-12-05" criterion | A time with no zone means Lagos time (+01:00). A date-only `to` means the end of that day, a date-only `from` the start |
+| B3 | Build 1 `addTier` | `priceCents` could be `Number.MAX_SAFE_INTEGER`; times 10 tickets the total is **no longer exact**, which breaks "priced in whole cents". | Thinking through S06's "whole cents" with the biggest possible numbers | `MAX_PRICE_CENTS` (the safe limit divided by 10). Test at the limit and one above |
+| B4 | Build 1 booking status | New bookings were `CONFIRMED`; S06 says a new booking is **pending**. | Reading S06 against the code | Bookings start `PENDING`; seats are held; cancel releases them. Build 1 tests and the UI ("Pending") updated |
+| B5 | Build 1 booking | **Any** event could be booked, including one the organizer never published. S02 says a new event is a private draft. | Reading S02 and S04 against the code | `bookTickets`, `joinWaitlist` and `takeNextFromWaitlist` all call `assertBookable`: not published gives `INVALID_STATE` |
+| B6 | `benchmark-sort.js` (first version) | It printed "about 2.1x" under a table that showed 1.6x, 3.2x, 2.1x and 3.8x for merge sort. A claim that did not match the numbers (the same mistake as Build 1's benchmark). | Reading the output against the text | Warm-up runs and best of 9, a Part 2 on bigger lists, and a column of "ns per n log n" that stays flat. The wording now says small lists are noisy |
+| B7 | `sorting.js` | A comparator returning `undefined` or `NaN` would **silently scramble** the order (every `<=` is false). | Thinking about what a bad comparator does | The merge throws `VALIDATION` if a comparator does not return a number |
+| B8 | `App.jsx` | After opening another event, the remembered tier belonged to the old event, so `find` returned `undefined` and the page would have crashed. | Tracing "open another event" by hand, then a UI test | `find(...) ?? event.tiers[0]`, and a test that opens another event and books there |
+| B9 | folder name | Build 1 used `tests/`; the brief says `test/`. | Reading the prompt | Moved to `test/`; `npm test` now runs the domain tests **and** the UI tests, so "every test runs" is true |
+
+## Problems I caused while fixing, and corrected
+
+| # | What | Fix |
+|---|------|-----|
+| F1 | Changing `name` to `title`, adding `city` and publishing would have broken the Build 1 demo, benchmark, tests and UI. | All were updated, and `createEvent` still accepts the old `name` and `date` field names |
+| F2 | One of my deliberate-bug checks ("dates accept 30 February") reported **0 failing tests**. I first thought it was a test gap. | It was my mutation: `false && a || b || c` still runs `b` and `c`, so 30 February was still caught. I redid it properly (`if (false) {`) and 3 tests failed, as they should |
+
+## Rules the brief left open (my decisions: change them if your class decides otherwise)
+
+- **Sort by date:** compares the full start time. The criterion says "two events on the same day ... the earlier one comes first, and the two events on the same day stay in title order". Both can only be true if "earlier" means a different day or time and "stay in title order" means the **same moment**. If your class means "compare only the calendar day, then title", change the `date` comparator in `eventSearch.js` and one test.
+- `sortEvents` needs an explicit option (`undefined` is `VALIDATION`); `searchEvents` defaults to `'date'`.
+- `from` after `to` returns an empty list, not an error.
+- Publishing a published event is harmless; `unpublishEvent` exists because the story title says "unpublish".
+- `q` searches the title and venue only (not the city), as the prompt says.
+- Booking a draft is `INVALID_STATE` (not `NOT_FOUND`).
+- A new `PENDING` booking holds seats. Nothing confirms it yet: that is for the payment build.
+- New error code `INVALID_STATE` (from the prompt). Summaries use the field names `minPriceCents` and `seatsLeft` (the prompt did not name them).
+
+## What is NOT finished, and why
+
+1. **S04's acceptance criteria are mine.** The brief says your class writes them in pairs. The three in `docs/user-stories.md` and `test/s04-publish.test.js` are a **proposed draft**. Replace them with your own and change the tests to match.
+2. **S16's second half** (a GitHub workflow running `npm test` on every push) is Build 9. Only the `npm test` half is done.
+3. **Started events stay on the public list.** Booking is refused once an event has started, but `listEventSummaries` still lists it with its seats. The brief does not say to hide them. Decide in your class.
+4. **"Cheapest tier" includes sold-out tiers.** An event whose cheapest tier is sold out still shows that tier's price. The brief says "compares with the cheapest tier", so I did exactly that.
+5. **Identity is still just a name** (from Build 1).

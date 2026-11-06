@@ -5,7 +5,7 @@ import { DomainError } from '../src/domain/errors.js';
 import { formatMoney } from '../src/domain/money.js';
 import {
   createStore, createEvent, addTier, bookTickets, cancelBooking,
-  findBookingByReference, joinWaitlist, takeNextFromWaitlist, listEvents, listWaitlist,
+  findBookingByReference, joinWaitlist, takeNextFromWaitlist, publishEvent, listEvents, listWaitlist,
 } from '../src/domain/inventory.js';
 
 // Prints a numbered heading so the output reads as chapters.
@@ -14,19 +14,21 @@ const step = (n, title) => console.log(`\n── ${n}. ${title}`);
 // Setup: one store, one event, two tiers. Regular has only 4 seats so it sells out fast.
 const store = createStore();
 const event = createEvent(store, {
-  name: 'Lagos Night of Tech',
+  title: 'Lagos Night of Tech',
+  city: 'Lagos',
   venue: 'Landmark Centre, Victoria Island',
   // 30 days from now, so the demo keeps working (booking closes once an event has started).
   startsAt: new Date(Date.now() + 30 * 24 * 3600 * 1000).toISOString(),
 });
 const regular = addTier(store, event.id, { name: 'Regular', priceCents: 500_000, capacity: 4 }); // ₦5,000
 const vip = addTier(store, event.id, { name: 'VIP', priceCents: 2_000_000, capacity: 2 }); // ₦20,000
+publishEvent(store, event.id); // events start as drafts; only published events can be booked
 
 // Shortcut so each booking below is one short line.
 const book = (tier, quantity, customer) => bookTickets(store, { eventId: event.id, tierId: tier.id, quantity, customer });
 
 step(1, 'The event goes on sale');
-console.log(`${event.name} at ${event.venue}`);
+console.log(`${event.title} in ${event.city}, at ${event.venue}`);
 for (const t of listEvents(store)[0].tiers) {
   console.log(`  ${t.name}: ${t.capacity} seats at ${formatMoney(t.priceCents)}`);
 }

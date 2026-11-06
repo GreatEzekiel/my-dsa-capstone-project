@@ -1,9 +1,9 @@
-// app.test.jsx: run with `npm run test:ui`.
+// app.test.jsx: run with `npm run test:ui` (or as part of `npm test`).
 // These tests open the real <App /> in a fake browser (jsdom) and use it like a person would:
 // type into fields, click buttons, read what appears on screen. They run on Vitest, which is built on Vite.
 
 import { afterEach, describe, expect, test } from 'vitest';
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import App from '../../src/ui/App.jsx';
 
@@ -99,5 +99,83 @@ describe('Event ticketing screen', () => {
     await press(user, 'Dayo leaves the waitlist');
     expect(screen.getByText(/Dayo left the Regular waitlist/)).toBeTruthy();
     expect(screen.getByText(/Nobody is waiting/)).toBeTruthy();
+  });
+});
+
+// ---------- Build 2: search, filter, sort ----------
+
+// The titles of the events currently listed in the search results, in the order shown.
+const listed = () => within(screen.getByRole('list', { name: 'Search results' }))
+  .queryAllByRole('button').map((b) => b.getAttribute('aria-label').replace('Open ', ''));
+
+describe('Find an event (S05)', () => {
+  test('lists the published events by date, and never shows the draft', () => {
+    render(<App />);
+    expect(listed()).toEqual(['Abuja Jazz Night', 'Port Harcourt Comedy Live', 'Lagos Night of Tech', 'Lagos Food Festival']);
+    expect(screen.queryByRole('button', { name: /Ibadan Book Fair/ })).toBeNull(); // a draft: private
+    expect(screen.getByText('4 events')).toBeTruthy();
+  });
+
+  test('searching "JAZZ" leaves only Abuja Jazz Night', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await user.type(screen.getByLabelText('Search events'), 'JAZZ');
+    expect(listed()).toEqual(['Abuja Jazz Night']);
+    expect(screen.getByText('1 event')).toBeTruthy();
+  });
+
+  test('filtering by city, then sorting by price', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await user.selectOptions(screen.getByLabelText('City'), 'Lagos');
+    expect(listed()).toEqual(['Lagos Night of Tech', 'Lagos Food Festival']); // by date: 30 days, then 45 days
+    await user.selectOptions(screen.getByLabelText('Sort by'), 'price');
+    expect(listed()).toEqual(['Lagos Food Festival', 'Lagos Night of Tech']); // from ₦2,000, then from ₦5,000
+  });
+
+  test('a max price compares with the cheapest tier', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await user.type(screen.getByLabelText('Maximum price in naira'), '5000');
+    await user.selectOptions(screen.getByLabelText('Sort by'), 'price');
+    expect(listed()).toEqual(['Lagos Food Festival', 'Lagos Night of Tech']); // ₦2,000 and ₦5,000 (included)
+  });
+
+  test('a date range: "until" includes that whole day', () => {
+    render(<App />);
+    const day = (n) => new Date(Date.now() + n * 24 * 3600 * 1000).toISOString().slice(0, 10);
+    fireEvent.change(screen.getByLabelText('To date'), { target: { value: day(20) } }); // the comedy night is in 20 days
+    expect(listed()).toEqual(['Abuja Jazz Night', 'Port Harcourt Comedy Live']);
+    fireEvent.change(screen.getByLabelText('From date'), { target: { value: day(15) } });
+    expect(listed()).toEqual(['Port Harcourt Comedy Live']);
+  });
+
+  test('a price that is not a number shows the domain error instead of crashing', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await user.type(screen.getByLabelText('Maximum price in naira'), 'abc');
+    expect(screen.getByRole('alert').textContent).toMatch(/VALIDATION: maxPriceCents/);
+  });
+
+  test('no match says so', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await user.type(screen.getByLabelText('Search events'), 'zzzzzz');
+    expect(listed()).toEqual([]);
+    expect(screen.getByText(/No events match/)).toBeTruthy();
+  });
+
+  test('opening another event shows it, and booking there works', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(screen.getByRole('button', { name: 'Open Port Harcourt Comedy Live' }));
+    expect(screen.getByRole('heading', { level: 1, name: 'Port Harcourt Comedy Live' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Open Port Harcourt Comedy Live' }).getAttribute('aria-pressed')).toBe('true');
+    await typeName(user, 'Chidi');
+    await step(user, 'One more ticket', 4); // 5 tickets = every Silver seat
+    await press(user, 'Book tickets');
+    expect(screen.getByText(/Booked 5 × Silver for Chidi/)).toBeTruthy();
+    expect(screen.getByText('Pending')).toBeTruthy(); // S06: a booking starts pending
+    expect(screen.getByLabelText('Reference code').value).toMatch(/^[0-9A-Z]{4}-[0-9A-Z]{4}$/);
   });
 });

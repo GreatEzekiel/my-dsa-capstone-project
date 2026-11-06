@@ -3,7 +3,7 @@
 // as the number of bookings grows? Compares a Map (O(1)) with Array.find (O(n)).
 
 import { performance } from 'node:perf_hooks';
-import { createStore, createEvent, addTier, bookTickets } from '../src/domain/inventory.js';
+import { createStore, createEvent, addTier, bookTickets, publishEvent } from '../src/domain/inventory.js';
 
 // How many bookings to test with. Each size is 10x the previous (the last is 4x), so growth is easy to see.
 const sizes = [1_000, 10_000, 100_000, 400_000];
@@ -13,8 +13,9 @@ const ROUNDS = 5; // take the best round to dodge garbage-collection noise
 // Creates n real bookings through the domain code and returns them as an array.
 function build(n) {
   const store = createStore();
-  const event = createEvent(store, { name: 'Bench', venue: 'Nowhere', startsAt: new Date(Date.now() + 30 * 24 * 3600 * 1000).toISOString() });
+  const event = createEvent(store, { title: 'Bench', city: 'Lagos', venue: 'Nowhere', startsAt: new Date(Date.now() + 30 * 24 * 3600 * 1000).toISOString() });
   const tier = addTier(store, event.id, { name: 'GA', priceCents: 100, capacity: n });
+  publishEvent(store, event.id);
   const list = [];
   for (let i = 0; i < n; i++) {
     list.push(bookTickets(store, { eventId: event.id, tierId: tier.id, quantity: 1, customer: `C${i}` }));

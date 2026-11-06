@@ -10,7 +10,7 @@ import { DomainError } from '../src/domain/errors.js';
 import { referenceKey } from '../src/domain/ids.js';
 import {
   createStore, createEvent, addTier, bookTickets, cancelBooking, findBookingByReference,
-  joinWaitlist, leaveWaitlist, takeNextFromWaitlist, listEvents, listWaitlist, listBookings,
+  joinWaitlist, leaveWaitlist, takeNextFromWaitlist, publishEvent, listEvents, listEventSummaries, listWaitlist, listBookings,
 } from '../src/domain/inventory.js';
 
 // An event date 30 days from now, so tests never break just because the calendar moved on.
@@ -20,8 +20,9 @@ const inThirtyDays = () => new Date(Date.now() + 30 * 24 * 3600 * 1000).toISOStr
 // Returns shortcuts to keep each test short: book(), join(), and sold() to read the seats sold.
 function setup(capacity = 3) {
   const store = createStore();
-  const event = createEvent(store, { name: 'E', venue: 'V', startsAt: inThirtyDays() });
+  const event = createEvent(store, { title: 'E', city: 'Lagos', venue: 'V', startsAt: inThirtyDays() });
   const tier = addTier(store, event.id, { name: 'GA', priceCents: 1000, capacity });
+  publishEvent(store, event.id); // only published events can be booked
   const book = (quantity, customer = 'A') => bookTickets(store, { eventId: event.id, tierId: tier.id, quantity, customer });
   const join = (quantity, customer) => joinWaitlist(store, { eventId: event.id, tierId: tier.id, quantity, customer });
   const sold = () => listEvents(store)[0].tiers[0].sold;
@@ -94,7 +95,7 @@ test('returned bookings cannot be tampered with', () => {
   const { store, book } = setup();
   const b = book(1);
   assert.throws(() => { b.status = 'HACKED'; }, TypeError); // frozen: writing throws
-  assert.equal(findBookingByReference(store, b.reference).status, 'CONFIRMED');
+  assert.equal(findBookingByReference(store, b.reference).status, 'PENDING');
   // cancelling swaps in a new cancelled record
   const res = cancelBooking(store, b.reference);
   assert.equal(res.booking.status, 'CANCELLED');
@@ -106,7 +107,7 @@ test('the store is sealed: no data to reach into, and fake stores are refused', 
   assert.deepEqual(Object.keys(store), []); // an opaque token, nothing to edit
   assert.throws(() => { store.events = 'oops'; }, TypeError); // frozen
   const fake = { events: new Map() };
-  assert.equal(code(() => createEvent(fake, { name: 'x', venue: 'y', startsAt: inThirtyDays() })), 'VALIDATION');
+  assert.equal(code(() => createEvent(fake, { title: 'x', city: 'c', venue: 'y', startsAt: inThirtyDays() })), 'VALIDATION');
   assert.ok(event.id);
 });
 
@@ -232,8 +233,9 @@ test('no bookings or waitlist joins once the event has started; cancelling still
   // A fake clock we control. The event starts on Jan 2.
   let t = Date.parse('2026-01-01T00:00:00Z');
   const store = createStore({ now: () => t });
-  const event = createEvent(store, { name: 'E', venue: 'V', startsAt: '2026-01-02T00:00:00Z' });
+  const event = createEvent(store, { title: 'E', city: 'Lagos', venue: 'V', startsAt: '2026-01-02T00:00:00Z' });
   const tier = addTier(store, event.id, { name: 'GA', priceCents: 1000, capacity: 1 });
+  publishEvent(store, event.id);
   const args = { eventId: event.id, tierId: tier.id, quantity: 1, customer: 'A' };
 
   const b = bookTickets(store, args); // before the start: fine
@@ -281,7 +283,7 @@ test('invariants hold after random sequences of actions', () => {
     if (directBookingSucceeded) assert.equal(lineBefore, 0, 'a stranger jumped the queue');
 
     // The books must balance: seats sold === seats in bookings that are not cancelled, and never above capacity.
-    const confirmed = listBookings(store, { eventId: event.id }).filter((b) => b.status !== 'CANCELLED'); // CONFIRMED bookings hold seats
+    const confirmed = listBookings(store, { eventId: event.id }).filter((b) => b.status !== 'CANCELLED'); // PENDING bookings hold seats too
     const sold = listEvents(store)[0].tiers[0].sold;
     assert.equal(sold, confirmed.reduce((sum, b) => sum + b.quantity, 0));
     assert.ok(sold >= 0 && sold <= 15);
@@ -290,4 +292,40 @@ test('invariants hold after random sequences of actions', () => {
     const names = listWaitlist(store, tier.id).map((e) => e.customer.toLowerCase());
     assert.equal(new Set(names).size, names.length);
   }
+});
+
+// ---------- input that is not an object ----------
+// `null` is valid JSON, so a web request can deliver it. A default of `= {}` only covers `undefined`:
+// without asObject() these all crashed with a TypeError (a 500 over HTTP) instead of a clean VALIDATION error.
+
+test('null, numbers, text and arrays as the "details" argument are a VALIDATION error, never a crash', () => {
+  const { store, event, tier } = setup();
+  for (const junk of [null, 0, 42, 'text', true, [], [1, 2]]) {
+    const label = JSON.stringify(junk);
+    assert.equal(code(() => addTier(store, event.id, junk)), 'VALIDATION', `addTier(${label})`);
+    // A missing eventId or tierId is the caller's mistake (VALIDATION), not "nothing found" (NOT_FOUND).
+    assert.equal(code(() => bookTickets(store, junk)), 'VALIDATION', `bookTickets(${label})`);
+    assert.equal(code(() => joinWaitlist(store, junk)), 'VALIDATION', `joinWaitlist(${label})`);
+    assert.equal(code(() => leaveWaitlist(store, junk)), 'VALIDATION', `leaveWaitlist(${label})`);
+    assert.equal(code(() => createEvent(store, junk)), 'VALIDATION', `createEvent(${label})`);
+  }
+  // Options arguments are optional: null means "use the defaults".
+  assert.doesNotThrow(() => listEventSummaries(store, null));
+  assert.doesNotThrow(() => listBookings(store, null));
+  assert.doesNotThrow(() => createStore(null));
+  assert.equal(listEvents(store)[0].tiers[0].id, tier.id);
+});
+
+test('a missing id is VALIDATION; an id that is present but unknown is NOT_FOUND', () => {
+  const { store, event, tier } = setup();
+  const ok = { eventId: event.id, tierId: tier.id, quantity: 1, customer: 'Ada' };
+  for (const field of ['eventId', 'tierId']) {
+    for (const bad of [undefined, null, '', '   ', 7, {}]) {
+      assert.equal(code(() => bookTickets(store, { ...ok, [field]: bad })), 'VALIDATION', `${field}=${String(bad)}`);
+      assert.equal(code(() => joinWaitlist(store, { ...ok, [field]: bad })), 'VALIDATION', `${field}=${String(bad)}`);
+    }
+    assert.equal(code(() => bookTickets(store, { ...ok, [field]: 'no-such-id' })), 'NOT_FOUND', field);
+  }
+  assert.equal(code(() => leaveWaitlist(store, { tierId: tier.id })), 'VALIDATION'); // no entryId
+  assert.equal(code(() => leaveWaitlist(store, { tierId: tier.id, entryId: 'nope' })), 'NOT_FOUND');
 });

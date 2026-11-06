@@ -9,11 +9,16 @@
 
 import { DomainError, ErrorCode } from './errors.js';
 import { newId, newReference, referenceKey } from './ids.js';
+import { parseWhen } from './dates.js';
+import { EventStatus } from './eventStatus.js';
 import { isMoney } from './money.js';
 import { Queue } from './waitlistQueue.js';
 
 export const MIN_TICKETS = 1;
 export const MAX_TICKETS_PER_BOOKING = 10; // business rule: 1 to 10 per booking
+// The biggest price we accept. A booking total is price x quantity, and JavaScript numbers are only
+// exact up to Number.MAX_SAFE_INTEGER, so the price must be small enough that price x 10 stays exact.
+export const MAX_PRICE_CENTS = Math.floor(Number.MAX_SAFE_INTEGER / MAX_TICKETS_PER_BOOKING);
 
 // ---------- validation helpers ----------
 
@@ -106,16 +111,22 @@ function getTier(state, eventId, tierId) {
   return tier;
 }
 
-// Has the event already begun? Date.parse turns the ISO text into milliseconds, the same unit as the clock.
-const hasStarted = (state, event) => Date.parse(event.startsAt) <= state.now();
+// Has the event already begun? parseWhen turns the ISO text into milliseconds, the same unit as the clock.
+const hasStarted = (state, event) => parseWhen(event.startsAt, 'startsAt') <= state.now();
 
 // A copy of an event that is safe to hand out (the caller can't reach the stored tierIds list).
 const view = (event) => ({ ...event, tierIds: [...event.tierIds] });
 
-// The "no new bookings once the event has begun" rule. Cancelling a booking stays allowed.
-function assertNotStarted(state, event) {
+// "Can people still book this event?" Two rules, both about the event's state:
+//   1. it must be PUBLISHED (a draft is not public, so nobody can book it), and
+//   2. it must not have started yet.
+// Cancelling a booking is deliberately NOT checked here: it stays allowed.
+function assertBookable(state, event) {
+  if (event.status !== EventStatus.PUBLISHED) {
+    throw new DomainError(ErrorCode.INVALID_STATE, `${event.title} is not published`, { eventId: event.id, status: event.status });
+  }
   if (hasStarted(state, event)) {
-    throw new DomainError(ErrorCode.EVENT_STARTED, `${event.name} has already started`, { eventId: event.id });
+    throw new DomainError(ErrorCode.EVENT_STARTED, `${event.title} has already started`, { eventId: event.id });
   }
 }
 
@@ -128,14 +139,18 @@ export function createEvent(store, input) {
   const data = input !== null && typeof input === 'object' ? input : {};
 
   // Every field is checked BEFORE anything is saved: a rejected request saves nothing.
+  // The older names still work: `name` for title, `date` for startsAt (`??` = "if missing, use this").
   const event = {
     id: newId(),
-    name: text(data.name, 'name'),
+    title: text(data.title ?? data.name, 'title'),
+    city: text(data.city, 'city'),
     venue: text(data.venue, 'venue'),
-    startsAt: text(data.startsAt, 'startsAt'),
+    startsAt: text(data.startsAt ?? data.date, 'startsAt'),
+    status: EventStatus.DRAFT, // new events are private until the organizer publishes them
     tierIds: [], // filled by addTier, keeps tiers in the order they were added
   };
-  if (Number.isNaN(Date.parse(event.startsAt))) throw bad('startsAt', 'must be a valid date');
+  // Is it a REAL ISO date? (Date.parse alone would accept 30 February.) Throws VALIDATION if not.
+  parseWhen(event.startsAt, 'startsAt');
 
   state.events.set(event.id, event);
   // Return a COPY: the caller can't reach into the store and change the original.
@@ -147,13 +162,65 @@ export function addTier(store, eventId, input) {
   getEvent(state, eventId); // the event must exist
   const { name, priceCents, capacity } = asObject(input);
   const clean = { name: text(name, 'name'), capacity: whole(capacity, 'capacity', 1) };
-  if (!isMoney(priceCents)) throw bad('priceCents', 'must be a whole number of cents, 0 or more');
+  if (!isMoney(priceCents) || priceCents > MAX_PRICE_CENTS) {
+    throw bad('priceCents', `must be a whole number of cents from 0 to ${MAX_PRICE_CENTS}`);
+  }
 
   const tier = { id: newId(), eventId, ...clean, priceCents, sold: 0 };
   state.tiers.set(tier.id, tier);
   state.waitlists.set(tier.id, new Queue()); // every tier starts with an empty waiting line
   state.events.get(eventId).tierIds.push(tier.id);
-  return { ...tier }; // a copy, for the same reason as createEvent
+  return { ...tier, seatsLeft: seatsLeft(tier) }; // a copy, for the same reason as createEvent
+}
+
+// ---------- publishing ----------
+
+// Makes an event public. An event with no ticket tiers has nothing to sell, so it can't be published.
+// Publishing an already published event is harmless: it just stays published.
+export function publishEvent(store, eventId) {
+  const state = stateOf(store);
+  const event = getEvent(state, eventId);
+  if (event.tierIds.length === 0) {
+    throw new DomainError(ErrorCode.INVALID_STATE, `Add at least one ticket tier to ${event.title} before publishing`, { eventId });
+  }
+  event.status = EventStatus.PUBLISHED;
+  return view(event);
+}
+
+// Takes an event off the public list. Existing bookings are kept; only NEW bookings and waitlist joins stop.
+export function unpublishEvent(store, eventId) {
+  const state = stateOf(store);
+  const event = getEvent(state, eventId);
+  event.status = EventStatus.DRAFT;
+  return view(event);
+}
+
+// The small, flat objects the search functions work on: one per event, newest data every time.
+// By default only PUBLISHED events are listed (drafts are private).
+export function listEventSummaries(store, options) {
+  const state = stateOf(store);
+  const { publishedOnly = true } = asObject(options);
+  if (typeof publishedOnly !== 'boolean') throw bad('publishedOnly', 'must be true or false');
+
+  const summaries = [];
+  for (const event of state.events.values()) {
+    if (publishedOnly && event.status !== EventStatus.PUBLISHED) continue;
+    const tiers = event.tierIds.map((id) => state.tiers.get(id));
+    summaries.push({
+      id: event.id,
+      title: event.title,
+      city: event.city,
+      venue: event.venue,
+      startsAt: event.startsAt,
+      status: event.status,
+      tierCount: tiers.length,
+      // The cheapest tier's price, or null when there are no tiers (so "no price" is never mistaken for free).
+      minPriceCents: tiers.length ? Math.min(...tiers.map((t) => t.priceCents)) : null,
+      // Seats left across ALL tiers.
+      seatsLeft: tiers.reduce((sum, t) => sum + seatsLeft(t), 0),
+    });
+  }
+  return summaries;
 }
 
 // ---------- bookings ----------
@@ -175,7 +242,8 @@ function createBooking(state, tier, qty, name) {
     quantity: qty,
     customer: name,
     totalCents: tier.priceCents * qty, // integer x integer = integer, no rounding
-    status: 'CONFIRMED',
+    // PENDING: the seats are held, but the booking is not final yet (a later build adds payment).
+    status: 'PENDING',
     createdAt: new Date(state.now()).toISOString(),
   });
   tier.sold += qty; // take the seats
@@ -190,7 +258,7 @@ export function bookTickets(store, input) {
   const tier = getTier(state, id(eventId, 'eventId'), id(tierId, 'tierId'));
   const qty = quantityOf(quantity);
   const name = text(customer, 'customer');
-  assertNotStarted(state, state.events.get(tier.eventId));
+  assertBookable(state, state.events.get(tier.eventId));
 
   // 2. The capacity rule: never sell more seats than exist.
   const available = seatsLeft(tier);
@@ -263,7 +331,7 @@ export function joinWaitlist(store, input) {
   const tier = getTier(state, id(eventId, 'eventId'), id(tierId, 'tierId'));
   const qty = quantityOf(quantity);
   const name = text(customer, 'customer');
-  assertNotStarted(state, state.events.get(tier.eventId));
+  assertBookable(state, state.events.get(tier.eventId));
 
   const queue = state.waitlists.get(tier.id);
   // Joining makes sense when you cannot be booked right now: either not enough seats,
@@ -299,7 +367,7 @@ export function takeNextFromWaitlist(store, tierId) {
   const state = stateOf(store);
   const tier = state.tiers.get(tierId);
   if (!tier) throw new DomainError(ErrorCode.NOT_FOUND, 'Ticket tier not found', { tierId });
-  assertNotStarted(state, state.events.get(tier.eventId));
+  assertBookable(state, state.events.get(tier.eventId));
   const queue = state.waitlists.get(tierId);
   const head = queue.peek();
   if (!head) throw new DomainError(ErrorCode.NOT_FOUND, 'Nobody is on the waitlist', { tierId });

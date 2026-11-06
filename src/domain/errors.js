@@ -13,6 +13,7 @@ export const ErrorCode = Object.freeze({
   WAITLIST_FIRST: 'WAITLIST_FIRST', // people are already waiting: join the line, don't jump it
   ALREADY_WAITING: 'ALREADY_WAITING', // the same person is already in this tier's line
   EVENT_STARTED: 'EVENT_STARTED', // the event has begun: no new bookings or waitlist joins
+  INVALID_STATE: 'INVALID_STATE', // the action is not allowed in the current state (publishing with no tiers, booking a draft)
 });
 
 // `extends Error` keeps everything a normal error has: message, stack trace,

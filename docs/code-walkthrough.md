@@ -5,7 +5,7 @@ plain-language explanation of **what each line does and why it is written that w
 files say the same things in short form.
 
 Suggested reading order: `errors.js` → `ids.js` → `money.js` → `waitlistQueue.js` → `inventory.js` →
-`demo.js` → `benchmark-lookup.js` → `tests/` → `main.jsx` → `index.css` → `App.jsx`.
+`demo.js` → `benchmark-lookup.js` → `test/` → `main.jsx` → `index.css` → `App.jsx`.
 
 ---
 
@@ -337,7 +337,7 @@ if ([...queue].some((e) => nameKey(e.customer) === nameKey(name))) throw ... ALR
 
 ## 8. Tests
 
-### `tests/domain.test.js` (Node's built-in runner)
+### `test/domain.test.js` (Node's built-in runner)
 ```js
 const code = (fn) => { try { fn(); } catch (e) { assert.ok(e instanceof DomainError); return e.code; } assert.fail('did not throw'); };
 ```
@@ -348,7 +348,7 @@ const code = (fn) => { try { fn(); } catch (e) { assert.ok(e instanceof DomainEr
   failure can be repeated) and, after every action, checks: seats sold equals the seats in confirmed bookings; sold stays
   between 0 and capacity; nobody is in the line twice; and no stranger ever booked while someone was waiting.
 
-### `tests/ui/app.test.jsx` (Vitest + Testing Library)
+### `test/ui/app.test.jsx` (Vitest + Testing Library)
 - `render(<App />)` puts the real screen into a fake browser (jsdom). `userEvent` clicks and types like a person.
 - Elements are found **by what a user sees** (`getByRole('button', { name: 'Book tickets' })`), not by CSS classes, so
   restyling the page doesn't break the tests, and it also checks the buttons have proper accessible names.
@@ -470,3 +470,256 @@ Tailwind classes are tiny single-purpose styles you combine. Example from a card
 | **Token** | a small stand-in object that points at something hidden (our sealed store) |
 | **Hook** | a React function (`useState`, `useRef`...) that gives a component memory |
 | **Render** | React drawing the screen from the current data |
+
+
+---
+---
+
+# Part 2: Build 2
+
+## 11. What changed in `inventory.js`
+
+```js
+const event = {
+  id: newId(),
+  title: text(data.title ?? data.name, 'title'),
+  city: text(data.city, 'city'),
+  venue: text(data.venue, 'venue'),
+  startsAt: text(data.startsAt ?? data.date, 'startsAt'),
+  status: EventStatus.DRAFT, // 'draft'
+  tierIds: [],
+};
+parseWhen(event.startsAt, 'startsAt');
+```
+- An event now has a **title** and a **city** (Build 1 called the title `name`). `data.title ?? data.name` means "use `title`; if it is missing, accept the old `name`". Same for `startsAt` and the old `date`.
+- `status: EventStatus.DRAFT` (the word `'draft'`): **every new event is private.** It becomes public only when the organizer publishes it.
+- `parseWhen(...)` is called **before** `state.events.set(...)`, so a bad date throws and nothing is saved ("validate first, change state last" again).
+- `const data = input !== null && typeof input === 'object' ? input : {};` makes `createEvent(store)`, `createEvent(store, null)` and `createEvent(store, 'text')` all give a clean `VALIDATION` error. (`typeof null` is `'object'` in JavaScript, which is why `null` is checked separately.)
+
+```js
+const view = (event) => ({ ...event, tierIds: [...event.tierIds] });
+```
+- A **copy** of an event to hand out. `{ ...event }` copies the fields, but `tierIds` is an array, and copying only the object would still share the same array, so we copy that too (`[...event.tierIds]`). Without this a caller could do `event.tierIds.push('x')` and change the stored event.
+
+```js
+export function publishEvent(store, eventId) {
+  const event = getEvent(state, eventId);
+  if (event.tierIds.length === 0) throw new DomainError(ErrorCode.INVALID_STATE, ...);
+  event.status = EventStatus.PUBLISHED;
+  return view(event);
+}
+```
+- Look the event up (`NOT_FOUND` if missing). An event with **no tiers has nothing to sell**, so publishing is refused with `INVALID_STATE` ("the request was well formed, but not allowed in the current state"). That is different from `VALIDATION` (the input itself was bad).
+- Setting `status` twice is harmless, so publishing a published event simply returns it.
+
+```js
+function assertBookable(state, event) {
+  if (event.status !== EventStatus.PUBLISHED) throw new DomainError(ErrorCode.INVALID_STATE, ...);
+  if (hasStarted(state, event)) throw new DomainError(ErrorCode.EVENT_STARTED, ...);
+}
+```
+- One function holds the two "can people still book?" rules, and `bookTickets`, `joinWaitlist` and `takeNextFromWaitlist` all call it. One place to change a rule means no function can forget it. `cancelBooking` does **not** call it on purpose: cancelling is always allowed.
+
+```js
+export const MAX_PRICE_CENTS = Math.floor(Number.MAX_SAFE_INTEGER / MAX_TICKETS_PER_BOOKING);
+```
+- A booking total is `price × quantity`. JavaScript numbers are exact only up to `Number.MAX_SAFE_INTEGER` (about 9 quadrillion). A price just under that limit times 10 would be **silently wrong**. So the largest price accepted is the limit divided by 10, and `totalCents` is always exact.
+
+```js
+status: 'PENDING',
+```
+- S06 says a new booking is **pending**. The seats are held right away (they count as sold), and cancelling releases them. Nothing "confirms" a booking yet: payment, in a later build, will.
+
+```js
+export function listEventSummaries(store, { publishedOnly = true } = {}) {
+  ...
+  minPriceCents: tiers.length ? Math.min(...tiers.map((t) => t.priceCents)) : null,
+  seatsLeft: tiers.reduce((sum, t) => sum + seatsLeft(t), 0),
+```
+- Builds the small flat objects the search works on. `tiers.map(t => t.priceCents)` makes a list of prices, `...` spreads it into `Math.min(...)`, which picks the smallest.
+- **`null` instead of `0` when there are no tiers**: 0 would mean "free". `null` means "no price", which is a different thing, and the search treats the two differently.
+- `reduce` adds up the seats left across tiers. `publishedOnly = true` by default means drafts are private unless asked for.
+
+## 12. `src/domain/dates.js`: real dates, the same on every computer
+
+```js
+const ISO_PATTERN = /^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?(Z|[+-]\d{2}:\d{2})?)?$/;
+```
+- A **regular expression** that describes exactly the allowed shapes. Read it piece by piece: `(\d{4})` four digits (year), `-`, `(\d{2})` month, `-`, `(\d{2})` day; then an optional group starting with `T` for the time: hours, `:`, minutes, optional `:seconds`, optional `.milliseconds`; then an optional zone: `Z` or `+01:00`/`-05:30`. `^` and `$` mean "the whole text, nothing extra". Each `( )` **captures** a piece so the code can read it.
+
+```js
+const check = new Date(Date.UTC(year, month - 1, day));
+if (check.getUTCFullYear() !== year || check.getUTCMonth() !== month - 1 || check.getUTCDate() !== day) throw ...
+```
+- The **round-trip check**. `Date.UTC` is forgiving: asked for 30 February it quietly returns 2 March. So we build the date, **read the pieces back**, and require them to equal what was written. 30 February comes back as 2 March, the day does not match, and it is rejected. (`month - 1` because JavaScript counts months from 0.)
+
+```js
+let offsetMinutes = LAGOS_OFFSET_MINUTES;   // no zone written: Lagos
+if (zone === 'Z') offsetMinutes = 0;
+...
+return Date.UTC(year, month - 1, day, hour, minute, second, milli) - offsetMinutes * 60_000;
+```
+- A time with **no zone** is read as **Lagos time** (+01:00, Nigeria has no daylight saving). `Date.parse` would read it in the *computer's* zone, so the same event would sit at different instants on different computers.
+- 17:00 at +01:00 happened at 16:00 UTC, so we **subtract** the offset. The result is milliseconds since 1970: one number you can compare with `<`, `>`.
+
+```js
+const hour = dateOnly ? (endOfDay ? 23 : 0) : Number(h);
+```
+- A date-only value has no clock part. As a start (`from`) it means **00:00:00.000**, as an end (`to`) it means **23:59:59.999**. This is how "up to 2026-12-05" can include an event at 5 PM on 5 December.
+
+## 13. `src/domain/sorting.js`: the merge sort, line by line
+
+A worked example, sorting `[5, 2, 4, 1]`:
+
+```
+sortPart([5,2,4,1])
+  middle = 2
+  left  = sortPart([5,2])  ->  left=sortPart([5])=[5]  right=sortPart([2])=[2]  merge -> [2,5]
+  right = sortPart([4,1])  ->  [4] and [1]                                       merge -> [1,4]
+  merge([2,5], [1,4]):  compare 2 vs 1 -> take 1;  2 vs 4 -> take 2;  5 vs 4 -> take 4;  left over 5 -> [1,2,4,5]
+```
+
+```js
+if (items.length < 2) return items.slice();
+```
+- **Base case**: 0 or 1 items are already sorted, so recursion stops. `slice()` with no arguments returns a **copy**, so even here the caller never gets back their own array.
+
+```js
+const left = sortPart(items.slice(0, middle), compare);
+const right = sortPart(items.slice(middle), compare);
+return merge(left, right, compare);
+```
+- A function that **calls itself** on smaller problems is *recursion*. We sort each half (copies, so the original is never touched) and then merge the two sorted halves.
+
+```js
+if (order <= 0) merged[m++] = left[l++];
+else merged[m++] = right[r++];
+```
+- The heart of it. `order` is what the comparator says about the two front items: negative = left goes first, positive = right goes first, **0 = equal**.
+- `merged[m++] = left[l++]` means "put `left[l]` into `merged[m]`, then move both counters on by one" (`x++` returns the old value and then adds 1).
+- **Stability lives in `<=`.** On a tie (`order === 0`) we take from the **left**, which holds the items that were earlier in the original list. If this said `< 0`, ties would take from the right and equal items would swap order.
+
+```js
+if (typeof order !== 'number' || Number.isNaN(order)) throw bad('compare', 'must return a number');
+```
+- A comparator that returns `undefined` or `NaN` makes every `<=` check false, which would **silently scramble** the result. We refuse loudly instead.
+
+```js
+const collator = new Intl.Collator('en', { sensitivity: 'base', numeric: true });
+```
+- The built-in tool for comparing text the way people do: `sensitivity: 'base'` ignores case (and accents), and `numeric: true` puts "Show 2" before "Show 10" (plain alphabetical order would put "Show 10" first because `"1" < "2"`).
+
+```js
+export const compareNumbers = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+```
+- Written out instead of `a - b`, because `Infinity - Infinity` is `NaN`.
+
+**Why O(n log n)?** Halving a list of n items takes log₂ n rounds (1000 items need 10 halvings). In every round, merging touches each item once, so a round costs about n. Total: n × log₂ n. It does not matter whether the input is sorted or reversed: always n log n.
+
+## 14. `src/domain/eventSearch.js`
+
+```js
+function readCriteria(criteria) { ... }
+```
+- All input checking happens in this one function, **before** looking at any event. So bad input is refused even when the list is empty (a test checks exactly that), and the checking is done once, not once per event.
+- It also prepares the values: `q` and `city` are trimmed and lower-cased **once**, and the dates are turned into milliseconds **once**.
+
+```js
+toMs: isUnset(to) ? null : parseWhen(to, 'to', { endOfDay: isDateOnly(to) }),
+```
+- If `to` is a date-only value like `"2026-12-05"`, it becomes the **end** of that day. If it has a time, it is that exact moment.
+
+```js
+return summaries.filter((e) => { ... return true; });
+```
+- `Array.filter` builds a **new** array from the items for which the function returns `true`. Inside, every criterion that fails does `return false` early; surviving all of them means `return true`. The original array is never touched.
+
+```js
+if (c.maxPriceCents !== null) {
+  const price = priceOf(e);
+  if (price === null || price > c.maxPriceCents) return false;
+}
+```
+- `price === null` is the "no tiers, no price" case: such an event is **left out** of a price filter. A price of `0` is a real price (free), so it is compared normally.
+
+```js
+const byTitleThenId = (a, b) => compareText(a.title, b.title) || compareIds(a.id, b.id);
+```
+- `||` returns the first value that is not `0`. `compareText` gives `0` for equal titles, so the id decides. This is how **every sort ends with the same tie-breakers**, which makes the final order completely fixed (the same whatever order the events arrived in; a test checks that with three different input orders).
+
+```js
+date: (a, b) => { ... return (xNaN ? 0 : compareNumbers(x, y)) || byTitleThenId(a, b); },
+```
+- Compare the start times; if they are equal, fall back to title, then id. An event whose date can't be read sorts **last**.
+
+```js
+availability: (a, b) => compareNumbers(b.seatsLeft ?? 0, a.seatsLeft ?? 0) || byTitleThenId(a, b),
+```
+- `(b, a)` instead of `(a, b)`: swapping the arguments **reverses** the direction, so the most seats come first.
+
+```js
+if (typeof sortBy !== 'string' || !Object.hasOwn(COMPARATORS, sortBy)) throw ...
+```
+- `Object.hasOwn` asks "is this one of the keys I defined?". Plain `COMPARATORS[sortBy]` would wrongly accept `'toString'`, because every object inherits a `toString`.
+
+```js
+export function searchEvents(summaries, criteria, sortBy = 'date') {
+  return sortEvents(filterEvents(summaries, criteria), sortBy);
+}
+```
+- **Filter first, then sort**: sorting costs n log n, so sorting fewer items is cheaper.
+
+## 15. `scripts/demo-search.js` and `scripts/benchmark-sort.js`
+
+- `demo-search.js` follows the real flow: create (draft) → add tiers → publish → `listEventSummaries` → `searchEvents`. It keeps `JSON.stringify(all)` before and after, and prints `unchanged: true`: a visible proof that searching never changes the list.
+- `benchmark-sort.js` compares the merge sort with a simple **insertion sort** (O(n²)): each row doubles the list. Insertion sort's time quadruples (≈4×); merge sort's a little over doubles (≈2×). Part 2 divides the time by `n × log₂ n` and shows the result is roughly **constant**, which is what "the work is proportional to n log n" means. Each measurement is warmed up and the best of several runs is kept, because the first runs are slowed by JavaScript's compiler warming up and by garbage collection.
+
+## 16. The Build 2 tests
+
+```js
+export function deepFreeze(value) { ... Object.freeze(value); for (const inner of Object.values(value)) deepFreeze(inner); }
+```
+- `Object.freeze` stops an object being edited; `deepFreeze` does it for everything **inside** as well. ES modules run in strict mode, where writing to a frozen object **throws**. So running a function on a frozen list **proves** it never modified it: if it had tried, the test would crash.
+
+```js
+Array.prototype.sort = () => { throw new Error('the built-in sort was called'); };
+try { mergeSort(...) } finally { Array.prototype.sort = original; }
+```
+- Replaces the built-in sort with a trap that throws, runs our sort, and **always puts the original back** (`finally`), so a failing test can't break the others. If `mergeSort` secretly used the built-in, the test would catch it.
+
+```js
+const expected = [...items].sort((a, b) => a.key - b.key);
+assert.deepEqual(mine, expected);
+```
+- The built-in sort is used **only inside a test**, as an *oracle*: an independent answer to compare against, on 300 random lists with many ties (so stability is checked too). The rule "don't use the built-in sort" applies to the code being delivered, not to the checker.
+
+- **One test per acceptance criterion**, named after the story (`S05: ...`), so you can see at a glance that every criterion is covered. Extra edge cases are marked `(extra)`.
+- `error-codes.test.js` triggers **every** error code for real, and its last test fails if someone adds a code without a trigger.
+- **Mutation check** (done by hand while building, not a script): break the code on purpose (for example change `<=` to `<` in the merge) and make sure at least one test fails. A test that can't fail proves nothing. Eleven deliberate bugs were tried; all were caught.
+
+## 17. The search screen (`App.jsx`)
+
+```js
+const summaries = listEventSummaries(store);
+let results = []; let searchError = null;
+try { results = searchEvents(summaries, {...}, filters.sortBy); }
+catch (e) { if (!(e instanceof DomainError)) throw e; searchError = `${e.code}: ${e.message}`; }
+```
+- The screen **does not filter or sort anything itself**. It builds the criteria from what the person typed and calls the same `searchEvents` the tests use. If the domain refuses (for example a price that is not a number) the message is shown in red instead of crashing.
+
+```js
+maxPriceCents: filters.maxNaira.trim() === '' ? undefined : Math.round(Number(filters.maxNaira) * 100),
+```
+- The person types naira ("5000"); the domain wants whole kobo. `Number('abc')` is `NaN`, and `NaN` is not a whole number, so the domain says `VALIDATION`. `Math.round` fixes things like `19.99 * 100 = 1998.9999999999998`.
+
+```js
+const tier = event.tiers.find((t) => t.id === tierId) ?? event.tiers[0];
+```
+- After opening a different event, the remembered tier id belongs to the **old** event, so `find` returns `undefined`, and `??` falls back to the first tier of the new one. (The first version of this line would have crashed.)
+
+```js
+const cities = mergeSort([...new Set(summaries.map((e) => e.city))], compareText);
+```
+- `map` takes each event's city; `new Set(...)` removes duplicates; `[...set]` turns it back into an array; `mergeSort` (ours) puts the cities in order for the drop-down.
+
+- `<ul aria-label="Search results">` and `aria-label="Open Abuja Jazz Night"` give screen readers (and the tests) a name for each control. `aria-pressed` marks which event is open.

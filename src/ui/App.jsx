@@ -5,26 +5,41 @@
 import { useReducer, useRef, useState } from 'react';
 import { DomainError } from '../domain/errors.js';
 import { formatMoney } from '../domain/money.js';
+import { searchEvents, SORT_OPTIONS } from '../domain/eventSearch.js';
+import { compareText, mergeSort } from '../domain/sorting.js';
 import {
-  createStore, createEvent, addTier, bookTickets, cancelBooking, findBookingByReference,
-  joinWaitlist, leaveWaitlist, takeNextFromWaitlist, listEvents, listWaitlist,
+  createStore, createEvent, addTier, publishEvent, bookTickets, cancelBooking, findBookingByReference,
+  joinWaitlist, leaveWaitlist, takeNextFromWaitlist, listEvents, listEventSummaries, listWaitlist,
   MAX_TICKETS_PER_BOOKING,
 } from '../domain/inventory.js';
 
 // ---------- starter data ----------
 
-// Creates demo data so the screen isn't empty: one event, a Regular tier with 6 seats (easy to sell out)
-// and a VIP tier with 2. Prices are whole kobo: 500_000 = ₦5,000.
+// An ISO date n days from now at 18:00 Lagos time (17:00 UTC). Events are always in the future:
+// a fixed date would silently expire, and the domain refuses bookings once an event has started.
+function dayAt(n) {
+  const d = new Date(Date.now() + n * 24 * 3600 * 1000);
+  d.setUTCHours(17, 0, 0, 0);
+  return d.toISOString();
+}
+
+// Creates demo data so the screen isn't empty. Every event starts as a DRAFT, gets its tiers, and is then
+// PUBLISHED (the last one is left as a draft on purpose: drafts never appear in the public list).
+// Prices are whole kobo: 500_000 = ₦5,000.
 function seed() {
   const store = createStore();
-  // The event is always 30 days away at 18:00 Lagos time (17:00 UTC). A fixed date would silently
-  // expire, and the domain refuses bookings once an event has started.
-  const start = new Date(Date.now() + 30 * 24 * 3600 * 1000);
-  start.setUTCHours(17, 0, 0, 0);
-  const event = createEvent(store, { name: 'Lagos Night of Tech', venue: 'Landmark Centre, Victoria Island', startsAt: start.toISOString() });
-  addTier(store, event.id, { name: 'Regular', priceCents: 500_000, capacity: 6 });
-  addTier(store, event.id, { name: 'VIP', priceCents: 2_000_000, capacity: 2 });
-  return { store, eventId: event.id };
+  const make = (title, city, venue, days, tiers, publish = true) => {
+    const event = createEvent(store, { title, city, venue, startsAt: dayAt(days) });
+    for (const [name, priceCents, capacity] of tiers) addTier(store, event.id, { name, priceCents, capacity });
+    if (publish) publishEvent(store, event.id);
+    return event;
+  };
+  const main = make('Lagos Night of Tech', 'Lagos', 'Landmark Centre, Victoria Island', 30, [['Regular', 500_000, 6], ['VIP', 2_000_000, 2]]);
+  make('Abuja Jazz Night', 'Abuja', 'Jabi Lake Park', 12, [['Standard', 800_000, 40], ['Front row', 2_500_000, 4]]);
+  make('Lagos Food Festival', 'Lagos', 'Tafawa Balewa Square', 45, [['Entry', 200_000, 200], ['Family pack', 600_000, 30]]);
+  make('Port Harcourt Comedy Live', 'Port Harcourt', 'Hotel Presidential', 20, [['Silver', 1_000_000, 5], ['Gold', 1_500_000, 3]]);
+  make('Ibadan Book Fair', 'Ibadan', 'Cultural Centre, Mokola', 60, [['Entry', 100_000, 100]], false); // a draft
+  return { store, eventId: main.id };
 }
 
 // ---------- small helpers ----------
@@ -56,6 +71,13 @@ export default function App() {
   const logId = useRef(0);
   const [log, setLog] = useState([]);
 
+  // Which event is open (the main screen shows this one). Starts on the first demo event.
+  const [selectedId, setSelectedId] = useState(eventId);
+
+  // The search form. Everything is kept as the text the person typed; it is converted below.
+  const [filters, setFilters] = useState({ q: '', city: '', from: '', to: '', maxNaira: '', onlyAvailable: false, sortBy: 'date' });
+  const setF = (patch) => setFilters((f) => ({ ...f, ...patch }));
+
   // Form fields. tierId null means "use the first tier" (resolved below).
   const [tierId, setTierId] = useState(null);
   const [quantity, setQuantity] = useState(1);
@@ -65,10 +87,32 @@ export default function App() {
   // ----- values worked out on every render -----
 
   // A fresh read-only snapshot of the event and its tiers (with seatsLeft and waitlistSize).
-  const event = listEvents(store).find((e) => e.id === eventId);
-  // The chosen tier, or the first one.
+  const event = listEvents(store).find((e) => e.id === selectedId);
+  // The chosen tier, or the first one. (If the tier chosen earlier belongs to another event, `find` gives
+  // undefined and `??` falls back to the first tier.)
   const tier = event.tiers.find((t) => t.id === tierId) ?? event.tiers[0];
 
+  // ----- search (Build 2) -----
+  // The public list: PUBLISHED events only. Then the pure search functions filter and sort a NEW list.
+  const summaries = listEventSummaries(store);
+  // The city drop-down lists each city once, sorted with our own merge sort.
+  const cities = mergeSort([...new Set(summaries.map((e) => e.city))], compareText);
+  let results = [];
+  let searchError = null;
+  try {
+    results = searchEvents(summaries, {
+      q: filters.q,
+      city: filters.city || undefined, // "" means "any city"
+      from: filters.from || undefined, // <input type="date"> gives "2026-12-05", or "" when empty
+      to: filters.to || undefined,
+      // Naira typed by the person -> whole kobo. Text that isn't a number becomes NaN and the domain refuses it.
+      maxPriceCents: filters.maxNaira.trim() === '' ? undefined : Math.round(Number(filters.maxNaira) * 100),
+      onlyAvailable: filters.onlyAvailable,
+    }, filters.sortBy);
+  } catch (e) {
+    if (!(e instanceof DomainError)) throw e;
+    searchError = `${e.code}: ${e.message}`; // shown under the form instead of crashing
+  }
   // The button becomes "Join waitlist" when seats are short, OR when people are already waiting
   // (they are ahead of you even if seats exist: the domain enforces this too, with WAITLIST_FIRST).
   const lineExists = tier.waitlistSize > 0;
@@ -149,6 +193,12 @@ export default function App() {
 
   return (
     <main className="mx-auto max-w-6xl space-y-8 px-4 py-6 sm:px-6 lg:py-10">
+      <Browse
+        filters={filters} setF={setF} cities={cities} results={results} error={searchError}
+        selectedId={event.id}
+        onOpen={(id) => { setSelectedId(id); setTierId(null); setQuantity(1); }}
+      />
+
       <Hero event={event} seatsLeft={seatsLeftTotal} sold={soldTotal} waiting={waitingTotal} />
 
       {/* Two columns on large screens (tickets | forms); one stacked column on phones */}
@@ -246,6 +296,75 @@ export default function App() {
 
 // ---------- pieces ----------
 
+// The search panel (S05): a form on top, the matching events below. Pressing an event opens it in the main screen.
+function Browse({ filters, setF, cities, results, error, selectedId, onOpen }) {
+  const label = 'mb-1 block text-xs font-bold uppercase tracking-wider text-ink/60';
+  return (
+    <section aria-label="Find an event" className="rounded-3xl bg-white p-6 shadow-sm ring-1 ring-ink/5">
+      <h2 className="text-2xl font-extrabold tracking-tight">Find an event</h2>
+
+      {/* The criteria. Each control has an aria-label so screen readers (and the tests) can name it. */}
+      <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        <label className="sm:col-span-2"><span className={label}>Search</span>
+          <input className={field} aria-label="Search events" placeholder="Title or venue, like “jazz”" value={filters.q} onChange={(e) => setF({ q: e.target.value })} />
+        </label>
+        <label><span className={label}>City</span>
+          <select className={field} aria-label="City" value={filters.city} onChange={(e) => setF({ city: e.target.value })}>
+            <option value="">Any city</option>
+            {cities.map((c) => <option key={c} value={c}>{c}</option>)}
+          </select>
+        </label>
+        <label><span className={label}>Sort by</span>
+          <select className={field} aria-label="Sort by" value={filters.sortBy} onChange={(e) => setF({ sortBy: e.target.value })}>
+            {/* The labels people see, for the three sort options the domain accepts */}
+            {SORT_OPTIONS.map((o) => <option key={o} value={o}>{{ date: 'Date, soonest first', price: 'Price, cheapest first', availability: 'Most seats left' }[o]}</option>)}
+          </select>
+        </label>
+        <label><span className={label}>From</span>
+          <input className={field} type="date" aria-label="From date" value={filters.from} onChange={(e) => setF({ from: e.target.value })} />
+        </label>
+        <label><span className={label}>Until (included)</span>
+          <input className={field} type="date" aria-label="To date" value={filters.to} onChange={(e) => setF({ to: e.target.value })} />
+        </label>
+        <label><span className={label}>Max price (₦)</span>
+          <input className={`${field} num`} inputMode="decimal" aria-label="Maximum price in naira" placeholder="5000" value={filters.maxNaira} onChange={(e) => setF({ maxNaira: e.target.value })} />
+        </label>
+        <label className="flex items-end gap-2 pb-3 text-sm font-semibold">
+          <input type="checkbox" className="size-5 accent-cobalt" checked={filters.onlyAvailable} onChange={(e) => setF({ onlyAvailable: e.target.checked })} />
+          Only with seats left
+        </label>
+      </div>
+
+      {/* A refused search (for example a price that isn't a number) shows the domain's own message */}
+      {error && <p role="alert" className="mt-4 rounded-xl bg-coral/10 px-4 py-2.5 text-sm font-medium text-coral">{error}</p>}
+
+      <p aria-live="polite" className="num mt-4 text-sm font-semibold text-ink/60">
+        {error ? '' : `${results.length} ${results.length === 1 ? 'event' : 'events'}`}
+      </p>
+
+      <ul aria-label="Search results" className="mt-2 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        {results.map((e) => {
+          const open = e.id === selectedId;
+          return (
+            <li key={e.id}>
+              <button aria-label={`Open ${e.title}`} aria-pressed={open} onClick={() => onOpen(e.id)}
+                className={`h-full w-full rounded-2xl border-2 p-4 text-left transition ${open ? 'border-cobalt bg-cobalt/5' : 'border-ink/10 hover:border-ink/30'}`}>
+                <span className="block font-bold leading-tight">{e.title}</span>
+                <span className="mt-1 block text-sm text-ink/65">
+                  {e.city} · {new Date(e.startsAt).toLocaleDateString('en-NG', { timeZone: 'Africa/Lagos', day: 'numeric', month: 'short' })}
+                </span>
+                <span className="num mt-2 block text-sm font-semibold">{e.minPriceCents === null ? 'No tickets yet' : `from ${formatMoney(e.minPriceCents)}`}</span>
+                <span className={`num block text-xs font-bold ${e.seatsLeft === 0 ? 'text-coral' : 'text-mint'}`}>{e.seatsLeft === 0 ? 'Sold out' : `${e.seatsLeft} seats left`}</span>
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+      {!error && results.length === 0 && <p className="mt-2 text-sm text-ink/55">No events match. Try fewer filters.</p>}
+    </section>
+  );
+}
+
 // The dark banner at the top: date block, event name, venue and three live stats.
 function Hero({ event, seatsLeft, sold, waiting }) {
   const d = new Date(event.startsAt);
@@ -264,9 +383,9 @@ function Hero({ event, seatsLeft, sold, waiting }) {
           <p className="mt-1 text-xs font-semibold">{d.toLocaleDateString('en-NG', { ...tz, weekday: 'short' })}</p>
         </div>
         <div>
-          <h1 className="text-4xl font-extrabold leading-[1.05] tracking-tight sm:text-6xl">{event.name}</h1>
+          <h1 className="text-4xl font-extrabold leading-[1.05] tracking-tight sm:text-6xl">{event.title}</h1>
           <p className="mt-3 text-lg text-white/75">
-            {event.venue} · {d.toLocaleTimeString('en-NG', { ...tz, hour: 'numeric', minute: '2-digit' })}
+            {event.venue}, {event.city} · {d.toLocaleTimeString('en-NG', { ...tz, hour: 'numeric', minute: '2-digit' })}
           </p>
         </div>
       </div>
@@ -361,7 +480,7 @@ function Pass({ booking, tierName, onCancel }) {
     <div className="relative animate-rise overflow-hidden rounded-2xl bg-page">
       <div className={`flex items-center justify-between px-5 py-2.5 text-xs font-bold uppercase tracking-widest text-white ${cancelled ? 'bg-ink/60' : 'bg-cobalt'}`}>
         <span>{tierName} ticket</span>
-        <span>{cancelled ? 'Cancelled' : 'Confirmed'}</span>
+        <span>{cancelled ? 'Cancelled' : 'Pending'}</span>
       </div>
       <div className={`p-5 ${cancelled ? 'opacity-50' : ''}`}>
         <p className="text-2xl font-extrabold">{booking.customer}</p>
