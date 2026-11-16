@@ -8,10 +8,11 @@ import { mkdir, mkdtemp, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createDatabase } from '../src/db/connection.js';
 import { createApp } from '../src/http/app.js';
 import { registerRoutes } from '../src/http/routes.js';
 import { createMockPaymentGateway } from '../src/lib/mockPaymentGateway.js';
-import { createMemoryRepository } from '../src/repositories/memory.js';
+import { createSqliteRepository } from '../src/repositories/sqlite.js';
 import { createServices } from '../src/services/index.js';
 
 // The project's real public/ folder.
@@ -23,9 +24,21 @@ export const PUBLIC_DIR = fileURLToPath(new URL('../public', import.meta.url));
  * `logs` collects what the app wrote to its logger, so a test can check that a bug's stack trace went THERE
  * and not to the client. `extraRoutes(router)` adds routes that exist only for this test.
  */
-export async function startApp({ extraRoutes, publicDir = PUBLIC_DIR, maxBodyBytes, onlyExtra = false, devRoutes = false, now, paymentGateway = createMockPaymentGateway() } = {}) {
+export async function startApp({
+  extraRoutes,
+  publicDir = PUBLIC_DIR,
+  maxBodyBytes,
+  onlyExtra = false,
+  devRoutes = false,
+  now,
+  paymentGateway = createMockPaymentGateway(),
+  repository: suppliedRepository,
+  database: suppliedDatabase,
+  databasePath = ':memory:',
+} = {}) {
   const logs = { info: [], error: [] };
-  const repository = createMemoryRepository();
+  const database = suppliedDatabase ?? createDatabase(databasePath);
+  const repository = suppliedRepository ?? createSqliteRepository(database);
   const services = createServices({ repository, paymentGateway, now });
   const app = createApp({
     services,
@@ -39,7 +52,23 @@ export async function startApp({ extraRoutes, publicDir = PUBLIC_DIR, maxBodyByt
     },
   });
   const { port, url } = await app.listen(0);
-  return { app, repository, paymentGateway, services, port, url, logs, close: () => app.close({ forceAfterMs: 0 }) };
+  let closed = false;
+  return {
+    app,
+    database,
+    repository,
+    paymentGateway,
+    services,
+    port,
+    url,
+    logs,
+    async close() {
+      if (closed) return;
+      await app.close({ forceAfterMs: 0 });
+      database.close();
+      closed = true;
+    },
+  };
 }
 
 /**

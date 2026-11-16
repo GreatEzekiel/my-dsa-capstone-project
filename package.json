@@ -12,6 +12,8 @@
     "server:dev": "node --watch src/server.js",
     "demo": "node scripts/demo.js",
     "demo:search": "node scripts/demo-search.js",
+    "seed": "node scripts/seed.js",
+    "oversell": "node scripts/oversell-demo.js",
     "benchmark": "node scripts/benchmark-lookup.js",
     "benchmark:sort": "node scripts/benchmark-sort.js",
     "test": "npm run test:node && npm run test:ui",

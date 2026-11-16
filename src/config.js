@@ -4,9 +4,11 @@
 //
 //   PORT   the port to listen on. Default 3000. 0 means "pick any free port".
 //   HOST   the address to listen on. Default 127.0.0.1 (this computer only). Use 0.0.0.0 inside a container.
-//   DEMO   `true` or `1` (or the flag --demo): start with sample events AND the practice-only booking-transition route.
+//   DEMO           `true` or `1` (or the flag --demo): seed an empty database and enable the practice route.
+//   DATABASE_PATH  where the SQLite database is stored.
 
 import { fileURLToPath } from 'node:url';
+import { DEFAULT_DATABASE_PATH } from './db/connection.js';
 
 export const DEFAULT_PORT = 3000;
 export const DEFAULT_HOST = '127.0.0.1';
@@ -41,6 +43,7 @@ export function loadConfig(env = process.env, argv = process.argv.slice(2)) {
     port: readPort(env.PORT),
     host: env.HOST?.trim() || DEFAULT_HOST,
     demo: readDemo(env.DEMO, argv),
+    databasePath: env.DATABASE_PATH?.trim() || DEFAULT_DATABASE_PATH,
     // The folder next to src/: the project's public/ folder, wherever the project is on disk.
     publicDir: fileURLToPath(new URL('../public', import.meta.url)),
     maxBodyBytes: 1_000_000,

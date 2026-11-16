@@ -998,7 +998,7 @@ const port = /^\d{1,5}$/.test(text) ? Number(text) : NaN;
 - A bad `PORT` prints one line (`Cannot start: PORT must be...`) and exits with code `1`: no stack trace.
 - `process.once('SIGTERM', ...)`: when you press Ctrl+C or the system asks the program to stop, it finishes the requests in progress and then exits with code `0`.
 
-`healthService.check()` returns a **new** object each call, so nobody can alter the answer the next caller gets. It is a *liveness* check ("the program is up"); a *readiness* check ("and the database works") comes when a database exists.
+`healthService.check()` returns a **new** object each call, so nobody can alter the answer the next caller gets. It is a *liveness* check ("the program is up"); it does not query SQLite, so database readiness should be checked separately if the service later needs a readiness endpoint.
 
 ## 25. The Build 3 tests
 

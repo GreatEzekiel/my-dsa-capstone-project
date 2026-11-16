@@ -3,9 +3,10 @@
 // (config -> services -> app). Everything else receives what it needs; nothing else creates the world.
 
 import { ConfigError, loadConfig } from './config.js';
+import { createDatabase } from './db/connection.js';
 import { createApp } from './http/app.js';
 import { createMockPaymentGateway } from './lib/mockPaymentGateway.js';
-import { createMemoryRepository } from './repositories/memory.js';
+import { createSqliteRepository } from './repositories/sqlite.js';
 import { seedDemoData } from './services/demoData.js';
 import { createServices } from './services/index.js';
 
@@ -24,10 +25,18 @@ try {
   process.exit(1);
 }
 
-// Data starts empty and is lost when the server stops (a database comes in a later build).
-const repository = createMemoryRepository();
+let database;
+try {
+  database = createDatabase(config.databasePath);
+} catch (error) {
+  console.error(`Cannot open SQLite database: ${error.message}`);
+  process.exit(1);
+}
+const repository = createSqliteRepository(database);
 const services = createServices({ repository, paymentGateway: createMockPaymentGateway() });
-if (config.demo) await seedDemoData(services.events);
+if (config.demo && (await repository.listEvents()).length === 0) {
+  await seedDemoData(services.events);
+}
 
 const app = createApp({
   services,
@@ -46,6 +55,7 @@ try {
 } catch (error) {
   // The usual cause: another program already uses this port.
   console.error(`Cannot start: ${error.code === 'EADDRINUSE' ? `port ${config.port} is already in use (try PORT=3001 npm start)` : error.message}`);
+  database.close();
   process.exit(1);
 }
 
@@ -54,6 +64,7 @@ for (const signal of ['SIGINT', 'SIGTERM']) {
   process.once(signal, async () => {
     console.log(`\n${signal} received: shutting down`);
     await app.close();
+    database.close();
     process.exit(0);
   });
 }

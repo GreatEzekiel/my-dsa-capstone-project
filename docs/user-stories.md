@@ -145,6 +145,20 @@ so its data is reset when the server restarts. See [Build 4](build-4.md) and [AP
 The caller is identified by the `x-user-id` request header until authentication is added in a later build. Build 4
 also limits cancellation to the owner of a pending booking.
 
+## Build 5: SQLite and the overselling fix
+
+The REST API now persists its data in SQLite. Its conditional atomic reservation is tested against 50 simultaneous
+attempts for one remaining ticket. See [Build 5](build-5.md).
+
+### S08: As an attendee, I want to be certain the last ticket is sold to only one person
+
+- **Given** exactly one seat remains
+  **When** 50 attendees try to book it at the same moment
+  **Then** exactly one booking succeeds, 49 receive `SOLD_OUT`, and seats sold never exceed capacity.
+- **Given** the atomic database reservation is removed
+  **When** the overselling regression test runs
+  **Then** the test fails.
+
 ## Stories from earlier work (Build 1 rules, no story number yet)
 
 These rules were built in Build 1 and still have tests in `test/domain.test.js`:

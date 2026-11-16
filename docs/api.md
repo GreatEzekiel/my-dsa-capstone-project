@@ -2,8 +2,9 @@
 
 All bodies and answers are JSON. Money is **whole kobo** (`500000` = ₦5,000.00). Dates are ISO strings
 (`2026-12-05T18:00:00+01:00`; a time with no zone means Lagos time). Test everything with Postman: see [postman.md](postman.md).
-Start the server with `npm start` (empty) or `npm run start:demo` (4 sample events + 1 draft + the practice route in the last section).
-**The data lives in memory:** it starts empty and is lost when the server stops.
+Start the server with `npm start` or `npm run start:demo` (the latter seeds 4 sample events + 1 draft only when the database is empty, and enables the practice route in the last section).
+The API persists data in SQLite at `data/event-ticketing.sqlite` by default; set `DATABASE_PATH` to choose another file.
+`npm run seed` adds the demo events only when the configured database has no events. Data survives server restarts.
 Booking creation, payment and cancellation use the `x-user-id` header as a temporary caller identity; it is not authentication.
 
 ## The requests at a glance
@@ -119,7 +120,7 @@ Send `x-user-id: attendee-1` with this request. The header value, not any body f
 | the event has **started** | `409 EVENT_STARTED` |
 
 The booking starts as `pending` and the seats are held. `status`, `totalCents`, `reference` and `id` are chosen **by the server**: if you send them, they are ignored.
-**Many requests at once can't oversell:** 20 people booking the last 5 seats at the same moment get exactly 5 bookings and 15 `SOLD_OUT` (tested).
+**Many requests at once can't oversell:** 50 people booking the last seat at the same moment get exactly 1 booking and 49 `SOLD_OUT` (tested by `test/oversell.test.js`).
 
 ### `GET /api/bookings/:reference`
 `200 { "booking": { … } }` or `404`. Capitals, spaces and the hyphen don't matter (`7k2m9q4x` works), and `O`/`I`/`L` are read as `0`/`1`.
@@ -171,4 +172,4 @@ It moves a booking along the life cycle (`pending`, `paid`, `cancelled`, `refund
 
 ## Not built yet (on purpose)
 
-No logins (the `x-user-id` value is not authenticated), no paging, no rate limiting, no waitlist routes, no CORS, and no database (data is lost when the server stops). `docs/ai-log.md` lists each decision.
+No logins (the `x-user-id` value is not authenticated), no paging, no rate limiting, no waitlist routes, no CORS, and no UI-to-API wiring yet. `docs/ai-log.md` lists each decision.

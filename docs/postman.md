@@ -82,7 +82,7 @@ which is how I checked that the collection can fail.
 | `Error: connect ECONNREFUSED 127.0.0.1:3000` | The server is not running | `npm run start:demo` |
 | Folder 5 is all `404` | The server was started without demo mode | Stop it, then `npm run start:demo` |
 | A request in folders 2 to 5 fails with `404` or `400` and the URL contains `{{eventId}}` | You ran it before the request that saves that id | Run the folder from request 1 (or the whole collection) |
-| Failures after you **restarted** the server in the middle of a run | The data lives in memory and was lost | Run the whole collection again from the top |
+| Failures after you **restarted** the server in the middle of a run | SQLite data should persist; check that `DATABASE_PATH` is unchanged and the server can open its database | Restart with the same `DATABASE_PATH`; rerun the collection from the top only if you intentionally changed or cleared the database |
 | `POST` requests get `415` | Postman sent no `Content-Type` | Body tab: **raw**, then **JSON** |
 | Only the "Climb" requests fail | Your Postman tidied the URL differently | Read the status and the server log line: it must be `400` or `404` |
 

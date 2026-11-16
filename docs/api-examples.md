@@ -6,8 +6,8 @@ Start the server in one terminal:
 npm start
 ```
 
-In another terminal, run the following Bash commands in order. The server starts with empty in-memory data. These
-examples use Node (already required by the project) only to read generated IDs from JSON responses.
+In another terminal, run the following Bash commands in order. The server stores data in SQLite and keeps it after a
+restart. Each run creates a new event. These examples use Node (already required by the project) only to read generated IDs from JSON responses.
 
 ```sh
 BASE=http://localhost:3000
