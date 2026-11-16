@@ -15,6 +15,10 @@
 //   POST /api/events/:id/tiers                 add a ticket tier
 //   POST /api/events/:id/publish               make it public
 //   POST /api/events/:id/unpublish             take it off the public list
+//   GET  /api/events/:id/waitlists             read the event's ticket-tier queues
+//   POST /api/events/:eventId/tiers/:tierId/waitlist   join a ticket-tier queue
+//   DELETE /api/events/:eventId/tiers/:tierId/waitlist/:entryId   leave a queue
+//   POST /api/events/:eventId/tiers/:tierId/waitlist/next/book   book the queue head
 //   POST /api/bookings                         book tickets
 //   GET  /api/bookings/:reference              find a booking by its code
 //   POST /api/bookings/:reference/pay          pay through the mock gateway
@@ -40,6 +44,18 @@ export function registerRoutes(router, services, { devRoutes = false } = {}) {
     created({ tier: await services.events.addTier(params.id, body) }));
   router.post('/api/events/:id/publish', async ({ params }) => ok({ event: await services.events.publish(params.id) }));
   router.post('/api/events/:id/unpublish', async ({ params }) => ok({ event: await services.events.unpublish(params.id) }));
+  router.get('/api/events/:id/waitlists', async ({ params, headers }) =>
+    ok(await services.waitlists.listForEvent(params.id, headers['x-user-id'])));
+  router.post('/api/events/:eventId/tiers/:tierId/waitlist', async ({ params, body, headers }) => {
+    const result = await services.waitlists.join(params.eventId, params.tierId, body, headers['x-user-id']);
+    return created(result, `/api/events/${params.eventId}/tiers/${params.tierId}/waitlist/${result.entry.id}`);
+  });
+  router.delete('/api/events/:eventId/tiers/:tierId/waitlist/:entryId', async ({ params, headers }) =>
+    ok(await services.waitlists.leave(
+      params.eventId, params.tierId, params.entryId, headers['x-user-id'],
+    )));
+  router.post('/api/events/:eventId/tiers/:tierId/waitlist/next/book', async ({ params, headers }) =>
+    ok({ booking: await services.waitlists.bookNext(params.eventId, params.tierId, headers['x-user-id']) }));
 
   // ----- bookings -----
   router.post('/api/bookings', async ({ body, headers }) => {

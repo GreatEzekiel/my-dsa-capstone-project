@@ -56,11 +56,15 @@ export function createEventService({ repository, now = () => Date.now() }) {
   if (!repository) throw new TypeError('createEventService needs a repository');
 
   async function details(event) {
-    const tiers = await repository.listTiersForEvent(event.id);
+    const tiers = await Promise.all((await repository.listTiersForEvent(event.id)).map(async (tier) => ({
+      ...tier,
+      seatsLeft: tier.capacity - tier.sold,
+      waitlistSize: (await repository.listWaitlistForTier(tier.id)).length,
+    })));
     return {
       ...event,
       started: parseWhen(event.startsAt, 'startsAt') <= now(),
-      tiers: tiers.map((tier) => ({ ...tier, seatsLeft: tier.capacity - tier.sold })),
+      tiers,
     };
   }
 
@@ -101,7 +105,7 @@ export function createEventService({ repository, now = () => Date.now() }) {
         capacity: data.capacity,
         sold: 0,
       });
-      return { ...tier, seatsLeft: tier.capacity };
+      return { ...tier, seatsLeft: tier.capacity, waitlistSize: 0 };
     },
 
     async publish(eventId) {

@@ -1,4 +1,4 @@
-# Build 4 API examples
+# REST API examples
 
 Start the server in one terminal:
 
@@ -41,19 +41,59 @@ TIER_ID=$(printf '%s' "$TIER_JSON" | node -p 'JSON.parse(require("node:fs").read
 curl -sS -X POST "$BASE/api/events/$EVENT_ID/publish"
 ```
 
-## 4. Search published events
+## 4. Read, join, and book the waitlist
+
+The queue is initially empty:
+
+```sh
+curl -sS "$BASE/api/events/$EVENT_ID/waitlists" -H "x-user-id: $USER_ID"
+```
+
+Fill the 5-seat tier, then queue one attendee:
+
+```sh
+FULL_BOOKING_JSON=$(curl -sS -X POST "$BASE/api/bookings" \
+  -H 'Content-Type: application/json' \
+  -H "x-user-id: $USER_ID" \
+  -d "{\"eventId\":\"$EVENT_ID\",\"tierId\":\"$TIER_ID\",\"quantity\":5,\"customer\":\"Ada Obi\"}")
+FULL_REFERENCE=$(printf '%s' "$FULL_BOOKING_JSON" | node -p 'JSON.parse(require("node:fs").readFileSync(0, "utf8")).booking.reference')
+WAITLIST_JSON=$(curl -sS -X POST "$BASE/api/events/$EVENT_ID/tiers/$TIER_ID/waitlist" \
+  -H 'Content-Type: application/json' \
+  -H "x-user-id: $USER_ID" \
+  -d '{"customer":"Chidi Obi","quantity":1}')
+printf '%s\n' "$WAITLIST_JSON"
+WAITLIST_ENTRY_ID=$(printf '%s' "$WAITLIST_JSON" | node -p 'JSON.parse(require("node:fs").readFileSync(0, "utf8")).entry.id')
+```
+
+Cancel the temporary booking to free a seat, then let the queue owner book the head:
+
+```sh
+curl -sS -X POST "$BASE/api/bookings/$FULL_REFERENCE/cancel" \
+  -H "x-user-id: $USER_ID"
+curl -sS -X POST "$BASE/api/events/$EVENT_ID/tiers/$TIER_ID/waitlist/next/book" \
+  -H "x-user-id: $USER_ID"
+```
+
+If the attendee wants to leave rather than be promoted, use this request instead of the cancellation and promotion above:
+
+```sh
+curl -sS -X DELETE "$BASE/api/events/$EVENT_ID/tiers/$TIER_ID/waitlist/$WAITLIST_ENTRY_ID" \
+  -H "x-user-id: $USER_ID"
+```
+
+## 5. Search published events
 
 ```sh
 curl -sS "$BASE/api/events?q=Tech&city=Lagos&sort=date"
 ```
 
-## 5. Read the event and its ticket tiers
+## 6. Read the event and its ticket tiers
 
 ```sh
 curl -sS "$BASE/api/events/$EVENT_ID"
 ```
 
-## 6. Book tickets
+## 7. Book tickets
 
 ```sh
 BOOKING_JSON=$(curl -sS -X POST "$BASE/api/bookings" \
@@ -64,13 +104,13 @@ printf '%s\n' "$BOOKING_JSON"
 REFERENCE=$(printf '%s' "$BOOKING_JSON" | node -p 'JSON.parse(require("node:fs").readFileSync(0, "utf8")).booking.reference')
 ```
 
-## 7. Read the booking
+## 8. Read the booking
 
 ```sh
 curl -sS "$BASE/api/bookings/$REFERENCE"
 ```
 
-## 8. Pay with the mock gateway
+## 9. Pay with the mock gateway
 
 No card number is sent to the mock gateway.
 
@@ -84,7 +124,7 @@ curl -sS -X POST "$BASE/api/bookings/$REFERENCE/pay" \
 To try a decline and then retry, create another booking and first send:
 `-d '{"mockResult":"declined"}'`. The API returns `PAYMENT_DECLINED`; that booking remains pending.
 
-## 9. Book and cancel an unpaid booking
+## 10. Book and cancel an unpaid booking
 
 This second booking is deliberately left pending; paid bookings cannot be cancelled in Build 4.
 
@@ -98,7 +138,7 @@ curl -sS -X POST "$BASE/api/bookings/$CANCEL_REFERENCE/cancel" \
   -H "x-user-id: $USER_ID"
 ```
 
-## 10. Unpublish the event
+## 11. Unpublish the event
 
 ```sh
 curl -sS -X POST "$BASE/api/events/$EVENT_ID/unpublish"

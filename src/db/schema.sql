@@ -38,6 +38,19 @@ CREATE TABLE IF NOT EXISTS bookings (
   history_json TEXT NOT NULL
 ) STRICT;
 
+CREATE TABLE IF NOT EXISTS waitlist_entries (
+  id TEXT PRIMARY KEY NOT NULL,
+  event_id TEXT NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+  tier_id TEXT NOT NULL REFERENCES ticket_tiers(id) ON DELETE CASCADE,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  quantity INTEGER NOT NULL CHECK (quantity BETWEEN 1 AND 10),
+  customer TEXT NOT NULL CHECK (length(trim(customer)) > 0),
+  customer_key TEXT NOT NULL,
+  joined_at TEXT NOT NULL,
+  UNIQUE (tier_id, customer_key)
+) STRICT;
+
 CREATE INDEX IF NOT EXISTS ticket_tiers_event_id_idx ON ticket_tiers(event_id);
 CREATE INDEX IF NOT EXISTS bookings_event_id_idx ON bookings(event_id);
 CREATE INDEX IF NOT EXISTS bookings_tier_id_idx ON bookings(tier_id);
+CREATE INDEX IF NOT EXISTS waitlist_entries_tier_id_idx ON waitlist_entries(tier_id);

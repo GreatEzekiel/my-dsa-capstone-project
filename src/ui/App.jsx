@@ -1,47 +1,13 @@
-// App.jsx: the whole React screen.
-// React only DRAWS. Every rule (capacity, 1 to 10 tickets, FIFO waitlist) is enforced by the
-// domain functions imported below. The UI just calls them and shows the result or the error.
+// App.jsx: the React screen. Event and booking operations go through the REST API;
+// this component keeps only transient form and display state.
 
-import { useReducer, useRef, useState } from 'react';
-import { DomainError } from '../domain/errors.js';
+import { useEffect, useRef, useState } from 'react';
 import { formatMoney } from '../domain/money.js';
-import { searchEvents, SORT_OPTIONS } from '../domain/eventSearch.js';
+import { SORT_OPTIONS } from '../domain/eventSearch.js';
 import { compareText, mergeSort } from '../domain/sorting.js';
 import { BookingState, canTransition } from '../domain/bookingStateMachine.js';
-import {
-  createStore, createEvent, addTier, publishEvent, bookTickets, cancelBooking, findBookingByReference,
-  joinWaitlist, leaveWaitlist, takeNextFromWaitlist, listEvents, listEventSummaries, listWaitlist,
-  MAX_TICKETS_PER_BOOKING,
-} from '../domain/inventory.js';
-
-// ---------- starter data ----------
-
-// An ISO date n days from now at 18:00 Lagos time (17:00 UTC). Events are always in the future:
-// a fixed date would silently expire, and the domain refuses bookings once an event has started.
-function dayAt(n) {
-  const d = new Date(Date.now() + n * 24 * 3600 * 1000);
-  d.setUTCHours(17, 0, 0, 0);
-  return d.toISOString();
-}
-
-// Creates demo data so the screen isn't empty. Every event starts as a DRAFT, gets its tiers, and is then
-// PUBLISHED (the last one is left as a draft on purpose: drafts never appear in the public list).
-// Prices are whole kobo: 500_000 = ₦5,000.
-function seed() {
-  const store = createStore();
-  const make = (title, city, venue, days, tiers, publish = true) => {
-    const event = createEvent(store, { title, city, venue, startsAt: dayAt(days) });
-    for (const [name, priceCents, capacity] of tiers) addTier(store, event.id, { name, priceCents, capacity });
-    if (publish) publishEvent(store, event.id);
-    return event;
-  };
-  const main = make('Lagos Night of Tech', 'Lagos', 'Landmark Centre, Victoria Island', 30, [['Regular', 500_000, 6], ['VIP', 2_000_000, 2]]);
-  make('Abuja Jazz Night', 'Abuja', 'Jabi Lake Park', 12, [['Standard', 800_000, 40], ['Front row', 2_500_000, 4]]);
-  make('Lagos Food Festival', 'Lagos', 'Tafawa Balewa Square', 45, [['Entry', 200_000, 200], ['Family pack', 600_000, 30]]);
-  make('Port Harcourt Comedy Live', 'Port Harcourt', 'Hotel Presidential', 20, [['Silver', 1_000_000, 5], ['Gold', 1_500_000, 3]]);
-  make('Ibadan Book Fair', 'Ibadan', 'Cultural Centre, Mokola', 60, [['Entry', 100_000, 100]], false); // a draft
-  return { store, eventId: main.id };
-}
+import { MAX_TICKETS_PER_BOOKING } from '../domain/ticketLimits.js';
+import { getUiUserId, requestJson } from './api.js';
 
 // ---------- small helpers ----------
 
@@ -53,165 +19,285 @@ const field = 'w-full rounded-xl border border-ink/15 bg-white px-4 py-3 text-ba
 const btnPrimary = 'w-full rounded-xl bg-cobalt px-5 py-3.5 text-base font-bold text-white shadow-lg shadow-cobalt/25 transition hover:bg-cobalt/90 active:scale-[0.99] disabled:opacity-40';
 const btnQuiet = 'rounded-lg border border-ink/20 bg-white px-3 py-1.5 text-sm font-semibold transition hover:border-ink/40 disabled:opacity-40';
 
+function searchPath(filters) {
+  const query = new URLSearchParams();
+  for (const key of ['q', 'city', 'from', 'to']) {
+    if (filters[key]) query.set(key, filters[key]);
+  }
+  const maxNaira = filters.maxNaira.trim();
+  if (maxNaira) {
+    const naira = Number(maxNaira);
+    query.set('maxPriceCents', Number.isFinite(naira) ? String(Math.round(naira * 100)) : maxNaira);
+  }
+  query.set('onlyAvailable', String(filters.onlyAvailable));
+  query.set('sort', filters.sortBy);
+  return `/api/events?${query}`;
+}
+
 // ---------- the page ----------
 
 export default function App() {
-  // ----- state -----
-
-  // The domain store is a plain mutable object, not React state. useRef keeps the SAME object between
-  // renders; the `if` makes sure seed() runs only once, on the first render.
-  const app = useRef(null);
-  if (!app.current) app.current = seed();
-  const { store, eventId } = app.current;
-
-  // React can't see changes to the store, so after every action we call refresh().
-  // It bumps a counter, which forces a re-render so the screen shows the new data.
-  const [, refresh] = useReducer((n) => n + 1, 0);
-
-  // The "Recent activity" messages, newest first. logId gives each one a unique key.
+  const userIdRef = useRef(null);
+  if (!userIdRef.current) userIdRef.current = getUiUserId();
+  const userId = userIdRef.current;
   const logId = useRef(0);
   const [log, setLog] = useState([]);
-
-  // Which event is open (the main screen shows this one). Starts on the first demo event.
-  const [selectedId, setSelectedId] = useState(eventId);
-
-  // The search form. Everything is kept as the text the person typed; it is converted below.
-  const [filters, setFilters] = useState({ q: '', city: '', from: '', to: '', maxNaira: '', onlyAvailable: false, sortBy: 'date' });
-  const setF = (patch) => setFilters((f) => ({ ...f, ...patch }));
-
-  // Form fields. tierId null means "use the first tier" (resolved below).
+  const [filters, setFilters] = useState({
+    q: '', city: '', from: '', to: '', maxNaira: '', onlyAvailable: false, sortBy: 'date',
+  });
+  const [allEvents, setAllEvents] = useState([]);
+  const [results, setResults] = useState([]);
+  const [searchError, setSearchError] = useState('');
+  const [searchLoading, setSearchLoading] = useState(true);
+  const [selectedId, setSelectedId] = useState(null);
+  const [event, setEvent] = useState(null);
+  const [waitlists, setWaitlists] = useState({});
+  const [eventError, setEventError] = useState('');
+  const [eventLoading, setEventLoading] = useState(false);
+  const [refreshKey, setRefreshKey] = useState(0);
   const [tierId, setTierId] = useState(null);
   const [quantity, setQuantity] = useState(1);
   const [customer, setCustomer] = useState('');
   const [lookup, setLookup] = useState('');
+  const [found, setFound] = useState(null);
+  const [foundTierName, setFoundTierName] = useState('');
+  const [lookupError, setLookupError] = useState('');
+  const [busy, setBusy] = useState(false);
 
-  // ----- values worked out on every render -----
+  const setF = (patch) => setFilters((current) => ({ ...current, ...patch }));
+  const cities = mergeSort(
+    [...new Set((allEvents.length ? allEvents : results).map((summary) => summary.city))],
+    compareText,
+  );
 
-  // A fresh read-only snapshot of the event and its tiers (with seatsLeft and waitlistSize).
-  const event = listEvents(store).find((e) => e.id === selectedId);
-  // The chosen tier, or the first one. (If the tier chosen earlier belongs to another event, `find` gives
-  // undefined and `??` falls back to the first tier.)
-  const tier = event.tiers.find((t) => t.id === tierId) ?? event.tiers[0];
+  useEffect(() => {
+    const controller = new AbortController();
+    requestJson('/api/events', { signal: controller.signal })
+      .then(({ events: summaries }) => setAllEvents(summaries))
+      .catch((error) => {
+        if (error.name !== 'AbortError') setEventError(`${error.code ?? 'ERROR'}: ${error.message}`);
+      });
+    return () => controller.abort();
+  }, [refreshKey]);
 
-  // ----- search (Build 2) -----
-  // The public list: PUBLISHED events only. Then the pure search functions filter and sort a NEW list.
-  const summaries = listEventSummaries(store);
-  // The city drop-down lists each city once, sorted with our own merge sort.
-  const cities = mergeSort([...new Set(summaries.map((e) => e.city))], compareText);
-  let results = [];
-  let searchError = null;
-  try {
-    results = searchEvents(summaries, {
-      q: filters.q,
-      city: filters.city || undefined, // "" means "any city"
-      from: filters.from || undefined, // <input type="date"> gives "2026-12-05", or "" when empty
-      to: filters.to || undefined,
-      // Naira typed by the person -> whole kobo. Text that isn't a number becomes NaN and the domain refuses it.
-      maxPriceCents: filters.maxNaira.trim() === '' ? undefined : Math.round(Number(filters.maxNaira) * 100),
-      onlyAvailable: filters.onlyAvailable,
-    }, filters.sortBy);
-  } catch (e) {
-    if (!(e instanceof DomainError)) throw e;
-    searchError = `${e.code}: ${e.message}`; // shown under the form instead of crashing
-  }
-  // The button becomes "Join waitlist" when seats are short, OR when people are already waiting
-  // (they are ahead of you even if seats exist: the domain enforces this too, with WAITLIST_FIRST).
-  const lineExists = tier.waitlistSize > 0;
-  const needsWaitlist = quantity > tier.seatsLeft || lineExists;
+  useEffect(() => {
+    const controller = new AbortController();
+    setSearchLoading(true);
+    const timer = setTimeout(() => {
+      requestJson(searchPath(filters), { signal: controller.signal })
+        .then(({ events: summaries }) => {
+          setResults(summaries);
+          setSearchError('');
+          setSearchLoading(false);
+        })
+        .catch((error) => {
+          if (error.name !== 'AbortError') {
+            setSearchError(`${error.code ?? 'ERROR'}: ${error.message}`);
+            setSearchLoading(false);
+          }
+        });
+    }, 120);
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [filters, refreshKey]);
 
-  // Totals for the hero's stat chips.
-  const seatsLeftTotal = event.tiers.reduce((sum, t) => sum + t.seatsLeft, 0);
-  const soldTotal = event.tiers.reduce((sum, t) => sum + t.sold, 0);
-  const waitingTotal = event.tiers.reduce((sum, t) => sum + t.waitlistSize, 0);
+  useEffect(() => {
+    if (selectedId || results.length === 0) return;
+    const initial = results.find((summary) => summary.title === 'Lagos Night of Tech') ?? results[0];
+    setSelectedId(initial.id);
+  }, [results, selectedId]);
 
-  // Look up the typed reference on every keystroke. This is cheap because it is one O(1) Map lookup.
-  // A failed lookup (still typing, or wrong code) is normal here, so the catch simply ignores it.
-  let found = null;
-  try { found = lookup.trim() ? findBookingByReference(store, lookup) : null; } catch { /* not found yet */ }
+  useEffect(() => {
+    if (!selectedId) return undefined;
+    const controller = new AbortController();
+    setEventLoading(true);
+    Promise.all([
+      requestJson(`/api/events/${encodeURIComponent(selectedId)}`, { signal: controller.signal }),
+      requestJson(`/api/events/${encodeURIComponent(selectedId)}/waitlists`, {
+        signal: controller.signal,
+        userId,
+      }),
+    ])
+      .then(([eventResponse, waitlistResponse]) => {
+        setEvent(eventResponse.event);
+        setWaitlists(Object.fromEntries(
+          waitlistResponse.waitlists.map((waitlist) => [waitlist.tierId, waitlist.entries]),
+        ));
+        setEventError('');
+      })
+      .catch((error) => {
+        if (error.name !== 'AbortError') setEventError(`${error.code ?? 'ERROR'}: ${error.message}`);
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setEventLoading(false);
+      });
+    return () => controller.abort();
+  }, [selectedId, userId, refreshKey]);
 
-  // ----- actions -----
+  useEffect(() => {
+    const reference = lookup.trim();
+    if (!reference) {
+      setFound(null);
+      setLookupError('');
+      return undefined;
+    }
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      requestJson(`/api/bookings/${encodeURIComponent(reference)}`, { signal: controller.signal })
+        .then(({ booking }) => {
+          setFound(booking);
+          setLookupError('');
+        })
+        .catch((error) => {
+          if (error.name === 'AbortError') return;
+          setFound(null);
+          setLookupError(error.status === 404 ? '' : `${error.code ?? 'ERROR'}: ${error.message}`);
+        });
+    }, 200);
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [lookup, refreshKey]);
 
-  // Adds a message to the activity list, keeping the latest 6.
-  // The id is made OUTSIDE the updater function, because React may call updaters twice in dev.
+  useEffect(() => {
+    if (!found) {
+      setFoundTierName('');
+      return undefined;
+    }
+    if (event?.id === found.eventId) {
+      setFoundTierName(event.tiers.find((item) => item.id === found.tierId)?.name ?? 'Ticket');
+      return undefined;
+    }
+    const controller = new AbortController();
+    requestJson(`/api/events/${encodeURIComponent(found.eventId)}`, { signal: controller.signal })
+      .then(({ event: bookingEvent }) => {
+        setFoundTierName(bookingEvent.tiers.find((item) => item.id === found.tierId)?.name ?? 'Ticket');
+      })
+      .catch((error) => {
+        if (error.name !== 'AbortError') setFoundTierName('Ticket');
+      });
+    return () => controller.abort();
+  }, [event, found]);
+
   const say = (kind, text) => {
     const id = logId.current++;
-    setLog((l) => [{ id, kind, text }, ...l].slice(0, 6));
+    setLog((current) => [{ id, kind, text }, ...current].slice(0, 6));
   };
 
-  // EVERY button goes through run(). It calls the domain function and shows the success message,
-  // or turns a DomainError (SOLD_OUT, VALIDATION...) into a readable red one.
-  // Any other error is a real bug, so it is re-thrown instead of hidden.
-  // `finally` always refreshes, because even a failed action may have changed what should be shown.
-  function run(fn) {
+  async function run(action) {
+    if (busy) return;
+    setBusy(true);
     try {
-      const message = fn();
+      const message = await action();
       if (message) say('ok', message);
-    } catch (e) {
-      if (!(e instanceof DomainError)) throw e;
-      say('error', `${e.code}: ${e.message}`);
+    } catch (error) {
+      say('error', `${error.code ?? 'ERROR'}: ${error.message}`);
     } finally {
-      refresh();
+      setBusy(false);
+      setRefreshKey((current) => current + 1);
     }
   }
 
-  // The booking form's submit handler: books, or joins the waitlist when seats are short.
+  const activeEvent = event?.id === selectedId ? event : null;
+  const tier = activeEvent?.tiers.find((item) => item.id === tierId) ?? activeEvent?.tiers[0];
+  const currentWaitlist = tier ? (waitlists[tier.id] ?? []) : [];
+  const lineExists = currentWaitlist.length > 0 || (tier?.waitlistSize ?? 0) > 0;
+  const waitingCount = Math.max(currentWaitlist.length, tier?.waitlistSize ?? 0);
+  const needsWaitlist = Boolean(tier && (quantity > tier.seatsLeft || lineExists));
+  const seatsLeftTotal = activeEvent?.tiers.reduce((sum, item) => sum + item.seatsLeft, 0) ?? 0;
+  const soldTotal = activeEvent?.tiers.reduce((sum, item) => sum + item.sold, 0) ?? 0;
+  const waitingTotal = activeEvent?.tiers.reduce(
+    (sum, item) => sum + Math.max(waitlists[item.id]?.length ?? 0, item.waitlistSize ?? 0),
+    0,
+  ) ?? 0;
+
   const submit = (e) => {
-    e.preventDefault(); // stop the browser reloading the page
-    run(() => {
-      const args = { eventId: event.id, tierId: tier.id, quantity, customer };
+    e.preventDefault();
+    if (!activeEvent || !tier) return;
+    run(async () => {
       if (needsWaitlist) {
-        const { position } = joinWaitlist(store, args);
-        return `${customer.trim()} is number ${position} on the ${tier.name} waitlist`;
+        const result = await requestJson(
+          `/api/events/${encodeURIComponent(activeEvent.id)}/tiers/${encodeURIComponent(tier.id)}/waitlist`,
+          { method: 'POST', body: { quantity, customer }, userId },
+        );
+        return `${customer.trim()} is number ${result.position} on the ${tier.name} waitlist`;
       }
-      const b = bookTickets(store, args);
-      setLookup(b.reference); // fill the lookup box so the new ticket appears on the right
-      return `Booked ${b.quantity} × ${tier.name} for ${b.customer}`;
+      const { booking } = await requestJson('/api/bookings', {
+        method: 'POST',
+        body: { eventId: activeEvent.id, tierId: tier.id, quantity, customer },
+        userId,
+      });
+      setLookup(booking.reference);
+      return `Booked ${booking.quantity} × ${tier.name} for ${booking.customer}`;
     });
   };
 
-  // Cancels the looked-up booking and names who is next in line.
-  const cancel = () => run(() => {
-    const r = cancelBooking(store, found.reference);
-    return r.nextInLine
-      ? `Cancelled ${found.reference}. Next in line: ${r.nextInLine.customer}`
-      : `Cancelled ${found.reference}. Nobody is waiting`;
+  const cancel = () => run(async () => {
+    const { booking } = await requestJson(
+      `/api/bookings/${encodeURIComponent(found.reference)}/cancel`,
+      { method: 'POST', userId },
+    );
+    const nextInLine = found.eventId === activeEvent?.id && found.tierId === tier?.id
+      ? currentWaitlist[0]?.customer
+      : null;
+    return `Cancelled ${booking.reference}.${nextInLine ? ` Next in line: ${nextInLine}.` : ''}`;
   });
 
-  // Removes one person from a tier's waitlist (everyone behind them moves up).
-  const leave = (t, w) => run(() => {
-    leaveWaitlist(store, { tierId: t.id, entryId: w.id });
-    return `${w.customer} left the ${t.name} waitlist`;
+  const leave = (targetTier, entry) => run(async () => {
+    await requestJson(
+      `/api/events/${encodeURIComponent(activeEvent.id)}/tiers/${encodeURIComponent(targetTier.id)}/waitlist/${encodeURIComponent(entry.id)}`,
+      { method: 'DELETE', userId },
+    );
+    return `${entry.customer} left the ${targetTier.name} waitlist`;
   });
 
-  // Books the person at the front of a tier's waitlist.
-  const bookNext = (t) => run(() => {
-    const b = takeNextFromWaitlist(store, t.id);
-    setLookup(b.reference);
-    return `Booked ${b.quantity} × ${t.name} for ${b.customer} from the waitlist`;
+  const bookNext = (targetTier) => run(async () => {
+    const { booking } = await requestJson(
+      `/api/events/${encodeURIComponent(activeEvent.id)}/tiers/${encodeURIComponent(targetTier.id)}/waitlist/next/book`,
+      { method: 'POST', userId },
+    );
+    setLookup(booking.reference);
+    return `Booked ${booking.quantity} × ${targetTier.name} for ${booking.customer} from the waitlist`;
   });
 
-  // ----- what appears on screen -----
+  if (!activeEvent) {
+    return (
+      <main className="mx-auto max-w-6xl space-y-6 px-4 py-10">
+        <h1 className="text-3xl font-extrabold">Event Ticketing</h1>
+        <p role={eventError ? 'alert' : 'status'} className="rounded-xl bg-white p-5">
+          {eventError || searchError || (searchLoading || eventLoading
+            ? 'Loading events from the API…'
+            : 'No published events yet. Run npm run seed to load sample events.')}
+        </p>
+        <Activity log={log} />
+      </main>
+    );
+  }
 
   return (
     <main className="mx-auto max-w-6xl space-y-8 px-4 py-6 sm:px-6 lg:py-10">
       <Browse
         filters={filters} setF={setF} cities={cities} results={results} error={searchError}
-        selectedId={event.id}
+        selectedId={activeEvent.id}
         onOpen={(id) => { setSelectedId(id); setTierId(null); setQuantity(1); }}
       />
 
-      <Hero event={event} seatsLeft={seatsLeftTotal} sold={soldTotal} waiting={waitingTotal} />
+      {eventError && <p role="alert" className="rounded-xl bg-coral/10 p-4 text-coral">{eventError}</p>}
+      <Hero event={activeEvent} seatsLeft={seatsLeftTotal} sold={soldTotal} waiting={waitingTotal} />
 
       {/* Two columns on large screens (tickets | forms); one stacked column on phones */}
       <div className="grid gap-8 lg:grid-cols-[1.2fr_1fr] lg:items-start">
         {/* LEFT: the ticket tiers, then the waitlists */}
         <div className="space-y-8">
           <section aria-label="Ticket tiers" className="space-y-5">
-            {event.tiers.map((t, i) => (
+            {activeEvent.tiers.map((t, i) => (
               <TierTicket key={t.id} tier={t} premium={i > 0} />
             ))}
           </section>
-          <Waitlists store={store} tiers={event.tiers} onBook={bookNext} onLeave={leave} />
+          <Waitlists tiers={activeEvent.tiers} queues={waitlists} onBook={bookNext} onLeave={leave} busy={busy} />
         </div>
 
         {/* RIGHT: booking form, found ticket, activity. On big screens this column sticks while you scroll. */}
@@ -221,7 +307,7 @@ export default function App() {
 
             {/* Tier picker: big radio-style buttons instead of a dropdown */}
             <div role="radiogroup" aria-label="Ticket type" className="grid grid-cols-2 gap-3">
-              {event.tiers.map((t) => {
+              {activeEvent.tiers.map((t) => {
                 const selected = t.id === tier.id;
                 return (
                   <button type="button" role="radio" aria-checked={selected} key={t.id} onClick={() => setTierId(t.id)}
@@ -256,13 +342,13 @@ export default function App() {
 
             {/* Live summary: the total (integer kobo maths), or why the button now says "Join waitlist" */}
             <div className={`rounded-xl px-4 py-3 text-sm ${needsWaitlist ? 'bg-gold/25' : 'bg-page'}`}>
-              {event.started ? (
+              {activeEvent.started ? (
                 <p><strong>This event has started.</strong> Booking and the waitlist are closed.</p>
               ) : needsWaitlist ? (
                 <p>
                   <strong>
                     {lineExists && quantity <= tier.seatsLeft
-                      ? `${tier.waitlistSize} already waiting.`
+                      ? `${waitingCount} already waiting.`
                       : tier.seatsLeft === 0 ? `${tier.name} is sold out.` : `Only ${tier.seatsLeft} left.`}
                   </strong>{' '}
                   {lineExists && quantity <= tier.seatsLeft
@@ -274,7 +360,9 @@ export default function App() {
               )}
             </div>
 
-            <button className={btnPrimary} disabled={event.started}>{needsWaitlist ? 'Join waitlist' : 'Book tickets'}</button>
+            <button className={btnPrimary} disabled={activeEvent.started || busy}>
+              {busy ? 'Please wait…' : needsWaitlist ? 'Join waitlist' : 'Book tickets'}
+            </button>
           </form>
 
           <section className="space-y-3 rounded-3xl bg-white p-6 shadow-sm ring-1 ring-ink/5">
@@ -282,9 +370,11 @@ export default function App() {
             <input className={`${field} font-mono uppercase tracking-widest`} aria-label="Reference code" value={lookup}
               onChange={(e) => setLookup(e.target.value)} placeholder="7K2M-9Q4X" />
             {found ? (
-              <Pass booking={found} tierName={event.tiers.find((t) => t.id === found.tierId).name} onCancel={cancel} />
+              <Pass booking={found} tierName={foundTierName || 'Ticket'} onCancel={cancel} />
             ) : (
-              <p className="text-sm text-ink/55">{lookup.trim() ? 'No booking with that code.' : 'Type or paste a reference code to see the ticket.'}</p>
+              <p role={lookupError ? 'alert' : undefined} className="text-sm text-ink/55">
+                {lookupError || (lookup.trim() ? 'No booking with that code.' : 'Type or paste a reference code to see the ticket.')}
+              </p>
             )}
           </section>
 
@@ -441,28 +531,35 @@ function TierTicket({ tier, premium }) {
 }
 
 // The waiting lines, one list per tier. The first person gets a highlight and a "Book them" button.
-function Waitlists({ store, tiers, onBook, onLeave }) {
-  const any = tiers.some((t) => t.waitlistSize > 0);
+function Waitlists({ tiers, queues, onBook, onLeave, busy }) {
+  const any = tiers.some((tier) => (queues[tier.id] ?? []).length > 0);
   return (
     <section aria-label="Waitlists" className="rounded-3xl bg-white p-6 shadow-sm ring-1 ring-ink/5">
       <h2 className="text-2xl font-extrabold tracking-tight">Waitlist</h2>
       {!any && <p className="mt-2 text-sm text-ink/55">Nobody is waiting. When a tier sells out, anyone who asks for more seats than remain can join here, and the line is strictly first come, first served.</p>}
       <div className="mt-4 grid gap-6 sm:grid-cols-2">
-        {tiers.filter((t) => t.waitlistSize > 0).map((t) => (
+        {tiers.filter((tier) => (queues[tier.id] ?? []).length > 0).map((t) => (
           <div key={t.id}>
             <h3 className="mb-2 text-sm font-bold uppercase tracking-wider text-ink/60">{t.name}</h3>
             <ol className="space-y-2">
-              {listWaitlist(store, t.id).map((w, i) => (
+              {(queues[t.id] ?? []).map((w, i) => (
                 <li key={w.id} className={`flex animate-rise items-center gap-3 rounded-2xl p-2.5 ${i === 0 ? 'bg-gold/25 ring-1 ring-gold' : 'bg-page'}`}>
                   <span className="grid size-9 shrink-0 place-items-center rounded-full bg-ink text-xs font-bold text-white">{initials(w.customer)}</span>
                   <span className="min-w-0 flex-1">
-                    <span className="block truncate font-semibold">{w.customer}</span>
+                    <span className="block truncate font-semibold">{w.customer}{w.isMine ? ' (you)' : ''}</span>
                     <span className="num block text-xs text-ink/60">{i === 0 ? 'Next in line' : `Position ${i + 1}`} · {w.quantity} ticket{w.quantity > 1 ? 's' : ''}</span>
                   </span>
                   <span className="flex shrink-0 gap-2">
-                    {i === 0 && <button className={btnQuiet} onClick={() => onBook(t)}>Book them</button>}
-                    {/* Anyone can give up their place; the aria-label says WHO, since every row has a Leave button */}
-                    <button className={btnQuiet} aria-label={`${w.customer} leaves the waitlist`} onClick={() => onLeave(t, w)}>Leave</button>
+                    {i === 0 && w.isMine && (
+                      <button className={btnQuiet} disabled={busy || w.quantity > t.seatsLeft} onClick={() => onBook(t)}>
+                        Book them
+                      </button>
+                    )}
+                    {w.isMine && (
+                      <button className={btnQuiet} disabled={busy} aria-label={`${w.customer} leaves the waitlist`} onClick={() => onLeave(t, w)}>
+                        Leave
+                      </button>
+                    )}
                   </span>
                 </li>
               ))}

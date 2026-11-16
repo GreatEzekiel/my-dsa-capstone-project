@@ -5,7 +5,7 @@ All bodies and answers are JSON. Money is **whole kobo** (`500000` = ₦5,000.00
 Start the server with `npm start` or `npm run start:demo` (the latter seeds 4 sample events + 1 draft only when the database is empty, and enables the practice route in the last section).
 The API persists data in SQLite at `data/event-ticketing.sqlite` by default; set `DATABASE_PATH` to choose another file.
 `npm run seed` adds the demo events only when the configured database has no events. Data survives server restarts.
-Booking creation, payment and cancellation use the `x-user-id` header as a temporary caller identity; it is not authentication.
+Booking creation, payment, cancellation and waitlist actions use the `x-user-id` header as a temporary caller identity; it is not authentication.
 
 ## The requests at a glance
 
@@ -18,6 +18,10 @@ Booking creation, payment and cancellation use the `x-user-id` header as a tempo
 | `POST` | `/api/events/:id/tiers` | Add a ticket tier | `201` |
 | `POST` | `/api/events/:id/publish` | Make the event public | `200` |
 | `POST` | `/api/events/:id/unpublish` | Take it off the public list | `200` |
+| `GET` | `/api/events/:id/waitlists` | Read its ticket-tier queues | `200` |
+| `POST` | `/api/events/:eventId/tiers/:tierId/waitlist` | Join a tier's FIFO queue | `201` |
+| `DELETE` | `/api/events/:eventId/tiers/:tierId/waitlist/:entryId` | Leave your queue entry | `200` |
+| `POST` | `/api/events/:eventId/tiers/:tierId/waitlist/next/book` | Book the queue head when it is your entry | `200` |
 | `POST` | `/api/bookings` | Book tickets | `201` + `Location` |
 | `GET` | `/api/bookings/:reference` | Find a booking by its code | `200` |
 | `POST` | `/api/bookings/:reference/pay` | Pay with the mock gateway | `200` |
@@ -97,6 +101,42 @@ Options combine (an event must pass all of them). An **empty** value (`?city=`) 
 
 ---
 
+## Waitlists
+
+Every waitlist request needs the caller's `x-user-id`. The value is a temporary demo identity, not authentication.
+The browser stores its generated ID in local storage so the same attendee can see and manage their own entries.
+
+### `GET /api/events/:id/waitlists`
+
+Returns one queue per tier, in FIFO order. Each entry includes `position` and `isMine`; internal user IDs are not returned.
+
+```sh
+curl -sS "$BASE/api/events/$EVENT_ID/waitlists" -H "x-user-id: $USER_ID"
+```
+
+### `POST /api/events/:eventId/tiers/:tierId/waitlist`
+
+```json
+{ "customer": "Ada Obi", "quantity": 2 }
+```
+
+The request is accepted only when the quantity cannot be booked immediately or someone is already waiting.
+The response includes the created entry and its queue `position`. A normalized customer name can appear only once
+per tier (`409 ALREADY_WAITING`).
+
+### `DELETE /api/events/:eventId/tiers/:tierId/waitlist/:entryId`
+
+Remove the caller's own entry. A different caller receives `404 NOT_FOUND`; the response names the removed entry and
+the next person, if any.
+
+### `POST /api/events/:eventId/tiers/:tierId/waitlist/next/book`
+
+No body is needed. The caller must own the first entry in the queue. The API atomically reserves that entry's seats,
+creates a pending booking for the same attendee, and removes the entry. If the head needs more seats than are
+available, it returns `409 SOLD_OUT` without skipping the head or changing the queue.
+
+---
+
 ## Bookings
 
 ### `POST /api/bookings`: book tickets (S06)
@@ -141,7 +181,7 @@ receives only a booking ID and whether the mock result should decline. Only the 
 `404 NOT_FOUND`. Paying a cancelled or already-paid booking is `409 INVALID_TRANSITION`; a second charge is not made.
 
 ### `POST /api/bookings/:reference/cancel`
-Send the owner's `x-user-id` header. Only a pending booking may be cancelled in Build 4. `200`:
+Send the owner's `x-user-id` header. Only a pending booking may be cancelled in this build. `200`:
 ```json
 { "booking": { …, "status": "cancelled", "history": [ { "status": "pending" }, { "status": "cancelled" } ] }, "seatsLeft": 3 }
 ```
@@ -172,4 +212,4 @@ It moves a booking along the life cycle (`pending`, `paid`, `cancelled`, `refund
 
 ## Not built yet (on purpose)
 
-No logins (the `x-user-id` value is not authenticated), no paging, no rate limiting, no waitlist routes, no CORS, and no UI-to-API wiring yet. `docs/ai-log.md` lists each decision.
+No logins (the `x-user-id` value is not authenticated), no paging, no rate limiting or CORS. The React UI uses the API through Vite's development proxy; production hosting still needs to serve the UI and API from the same origin. `docs/ai-log.md` lists the project decisions.

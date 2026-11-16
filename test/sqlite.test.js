@@ -17,7 +17,7 @@ test('SQLite schema enforces foreign keys, unique references and ticket capacity
     const tables = database.prepare(`
       SELECT name FROM sqlite_master WHERE type = ? ORDER BY name
     `).all('table').map((row) => row.name);
-    assert.deepEqual(tables, ['bookings', 'events', 'ticket_tiers', 'users']);
+    assert.deepEqual(tables, ['bookings', 'events', 'ticket_tiers', 'users', 'waitlist_entries']);
 
     await assert.rejects(repository.createTier({
       id: 'orphan-tier',

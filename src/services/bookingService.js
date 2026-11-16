@@ -96,6 +96,14 @@ export function createBookingService({ repository, paymentGateway, now = () => D
         throw new DomainError(ErrorCode.EVENT_STARTED, `${event.title} has already started`, { eventId });
       }
 
+      const waiting = await repository.listWaitlistForTier(tierId);
+      if (waiting.length > 0) {
+        throw new DomainError(ErrorCode.WAITLIST_FIRST, `${waiting.length} ${waiting.length === 1 ? 'person is' : 'people are'} already waiting for ${tier.name}. Join the waitlist`, {
+          tierId,
+          waiting: waiting.length,
+        });
+      }
+
       const available = tier.capacity - tier.sold;
       if (quantity > available) {
         throw new DomainError(ErrorCode.SOLD_OUT, `Only ${available} left in ${tier.name}, you asked for ${quantity}`, {
@@ -119,6 +127,13 @@ export function createBookingService({ repository, paymentGateway, now = () => D
       };
       const created = await repository.createBooking(booking);
       if (!created) {
+        const latestWaitlist = await repository.listWaitlistForTier(tierId);
+        if (latestWaitlist.length > 0) {
+          throw new DomainError(ErrorCode.WAITLIST_FIRST, `${latestWaitlist.length} ${latestWaitlist.length === 1 ? 'person is' : 'people are'} already waiting for ${tier.name}. Join the waitlist`, {
+            tierId,
+            waiting: latestWaitlist.length,
+          });
+        }
         const latestTier = await repository.getTier(tierId);
         const seatsLeft = latestTier ? latestTier.capacity - latestTier.sold : 0;
         throw new DomainError(ErrorCode.SOLD_OUT, `Only ${seatsLeft} left in ${tier.name}, you asked for ${quantity}`, {

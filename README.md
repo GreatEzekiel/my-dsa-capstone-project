@@ -21,7 +21,7 @@ The rules of an event ticketing system, built from an empty folder.
 
 - **The domain core** is plain JavaScript (ES modules, Node 22.13+, no runtime packages) and runs in the terminal.
   The API uses Node's built-in SQLite support; there are no runtime packages.
-- **The UI** is React + Tailwind, bundled by Vite. It is a thin screen on top of the same domain code. It adds no rules of its own.
+- **The UI** is React + Tailwind, bundled by Vite. It is a REST API client: event, booking and waitlist data comes from the Node server and SQLite, not browser-local domain storage.
 
 ---
 
@@ -39,6 +39,7 @@ npm start              # Build 5: SQLite-backed API on http://localhost:3000
 npm run start:demo     # the same, seeds 4 sample events + 1 draft only if the database is empty, and enables the practice route
                        #   try http://localhost:3000/health  and  http://localhost:3000/
 npm run seed           # add the demo events once if the configured database is empty
+npm run dev            # in another terminal: React UI at http://localhost:5173 (Vite proxies /api to port 3000)
 npm run oversell       # show the last-ticket race before and after the atomic SQLite fix
 # DATABASE_PATH=/path/to/data.sqlite npm start  # store the database at a chosen path
 
@@ -46,14 +47,13 @@ npm test               # EVERY test: the Node tests (domain, HTTP, security, arc
 npm run test:node      # only the Node tests (Node's built-in runner, no packages needed)
 npm run test:ui        # only the UI tests (the real screen in a fake browser)
 
-npm run dev            # React UI with instant reload at http://localhost:5173
 npm run build          # production build of the UI into dist/
 npm run preview        # serve the production build locally
 ```
 
 Requires **Node 22.13 or newer** (`node --version`).
 
-The demos, benchmarks, the server and `test:node` need no packages at all: they run on Node alone. Only the UI and `test:ui` need `npm install`.
+The demos, benchmarks, server and `test:node` need no packages at all: they run on Node alone. The React UI and `test:ui` need `npm install`.
 
 ---
 
@@ -66,11 +66,11 @@ src/
   http/                    LAYER 1, routes: the web plumbing (no business rules)
     app.js                 the server: body reading, routing, errors, static files
     router.js              method + path with :params
-    routes.js              the URLs the server answers: /health, events, search, bookings (see docs/api.md)
+    routes.js              the URLs the server answers: /health, events, search, bookings, waitlists (see docs/api.md)
     errors.js              HttpError + ONE error shape + domain code -> HTTP status table
     staticFiles.js         files from public/, with path-traversal defences
   services/                LAYER 2, services: the use cases, no HTTP
-    healthService.js  eventService.js  bookingService.js  index.js
+    healthService.js  eventService.js  bookingService.js  waitlistService.js  index.js
     demoData.js            sample events for `npm run start:demo`
   repositories/            LAYER 4, async API repositories
     sqlite.js              persistent events, tiers, bookings and atomic seat reservations
@@ -80,12 +80,12 @@ src/
     connection.js           creates the database and applies the schema
   lib/                     infrastructure adapters
     mockPaymentGateway.js  mock payment without card details
-  domain/                  LAYER 3, rules (plus the browser's local inventory)
+  domain/                  LAYER 3, shared business rules
     errors.js              DomainError + the list of error codes
     bookingStateMachine.js the booking life cycle as DATA: states, allowed moves, canTransition, assertTransition
     ids.js  money.js  dates.js  waitlistQueue.js  sorting.js  eventSearch.js   (pure rules)
-    inventory.js           browser UI data: in-memory store, events, bookings and waitlist
-  ui/                      the React screen (search panel + event page)
+    inventory.js           in-memory domain store used by terminal demos/tests
+  ui/                      REST-backed React client (fetch wrapper in api.js)
 public/                    files the server serves: index.html, styles.css, app.js, favicon.svg
 postman/                   the Postman collection (84 requests) + environment
 scripts/                   demos, benchmarks, seed.js and oversell-demo.js
@@ -95,7 +95,7 @@ test/
   booking-lifecycle.test.js           the state machine on REAL bookings + 4,000 random moves
   router.test.js  http.test.js  static.test.js  config.test.js  services.test.js
   server-process.test.js              starts the real server, checks /health and restart persistence
-  api-events.test.js  api-bookings.test.js  api-dev.test.js   routes over real HTTP, including mock payments
+  api-events.test.js  api-bookings.test.js  api-waitlists.test.js   routes over real HTTP
   architecture.test.js                "nothing calls upwards", checked from the imports
   domain.test.js  dates.test.js  sorting.test.js  s02..s06 story tests  error-codes.test.js
   oversell.test.js  sqlite.test.js    SQLite constraints, seed and 50-way booking race
@@ -176,8 +176,7 @@ Callers branch on `error.code`, never on the message text (which may change).
 A code looks like `7K2M-9Q4X`. It comes from the secure random source (`crypto`), **not** `Math.random()`,
 which is predictable. The alphabet leaves out `I`, `L`, `O`, `U` so a code can be **read aloud** without
 mix-ups. The alphabet has exactly 32 symbols, so `byte & 31` picks each one with equal probability.
-The code uses `globalThis.crypto` rather than `node:crypto`: same secure generator, but it also works in the
-browser so the UI can share the file.
+The code uses `globalThis.crypto` rather than `node:crypto`, so the same secure generator works in Node and browsers.
 
 ### Money (`money.js`)
 In JavaScript `0.1 + 0.2` is `0.30000000000000004`. So prices are stored as whole **kobo** (`500000` = ₦5,000.00).
@@ -207,7 +206,7 @@ calls `leaveWaitlist` and everyone behind them moves up.
 ### Time (`createStore({ now })`)
 The store has a clock, `Date.now()` by default. Once an event's start time has passed, new bookings and waitlist joins are refused
 (`EVENT_STARTED`). Cancelling is still allowed. Tests pass a fake clock to travel past the start without waiting.
-The demo, benchmark and UI create events **30 days in the future** so they never silently expire.
+The demo data and benchmarks create events in the future so examples do not silently expire.
 
 ### Cancel names the next person (`cancelBooking`)
 It returns `{ booking, seatsLeft, nextInLine, nextCanBeServed }`. It **names** the next person but does
@@ -282,7 +281,7 @@ A bad date, a price that is not a whole number, a wrong type or an unknown sort 
 ### Pure functions, and why that matters
 `filterEvents`, `sortEvents` and `searchEvents` take a list and return a **new** list. They never change the list
 they are given and never touch the store. So they are easy to test (the tests pass in a **frozen** list, which would
-throw if anything tried to edit it), and the UI can run them on every keystroke.
+throw if anything tried to edit it); the API service uses them to implement search and sorting.
 
 ### The merge sort (`sorting.js`)
 ```
@@ -406,9 +405,11 @@ The requests are mostly **POST** (create an event, add tiers, publish, book, can
 
 ## 6. The React + Tailwind UI
 
-`npm run dev` opens the screen. At the top is the **Find an event** panel (search, city, dates, max price, availability, sort); press an event to open it. Then try this on *Lagos Night of Tech*: book **6 Regular** tickets, then use **+** to ask for one more. The
-button turns into **Join waitlist**. Join as two different people, look up a booking by its code, cancel it, then
-press **Book them** on the first person in the waitlist.
+Start the API (`npm start`, or `npm run start:demo` for sample events) and run `npm run dev` in another terminal. Vite proxies `/api` requests to `http://127.0.0.1:3000`, so the same UI code works with the production server's same-origin routes. The screen loads published events, details, and waitlists from REST endpoints; it submits bookings, cancellation and waitlist actions back to the API. Search filters are sent as query parameters and applied server-side.
+
+Try this on *Lagos Night of Tech*: book **6 Regular** tickets, then use **+** to ask for one more. The
+button turns into **Join waitlist**. Join as two different attendees, look up a booking by its code, cancel it, then
+press **Book them** when you are the first person in line.
 
 **Design:** a dark hero banner with a calendar-style date block and live stats; ticket-shaped tier cards with a
 perforated stub and a big "seats left" number (VIP is the dark, gold-trimmed one); a "Sold out" stamp; a numbered
@@ -416,13 +417,12 @@ waitlist with avatars; and a found booking shown as a ticket with a big referenc
 "Cancelled" stamp. The colours and font are tokens in `src/ui/index.css` (`@theme`), so changing the look means
 editing one place. Motion is a small fade-up and switches off for people who ask their device for less motion.
 
-How it is wired (every part is commented in `App.jsx`):
+How it is wired:
 
-- The domain **store** lives in a `useRef`. It is a plain mutable object, not React state.
-- Because React can't see changes to it, `run()` calls `refresh()` after every action to redraw.
-- `run()` catches `DomainError`s and shows `CODE: message` in the activity feed. Any other error is a real
-  bug and is re-thrown so it isn't hidden.
-- The quantity stepper only allows 1 to 10, so the screen never sends a number the domain would reject.
+- `src/ui/api.js` sends `fetch` requests, adds the temporary `x-user-id` header to attendee actions, parses the standard API error shape and reports network failures.
+- `src/ui/App.jsx` stores only transient UI state (filters, form fields, selected event and notices). API responses update the screen; the server remains the source of truth for event and booking data.
+- The Vite dev and preview proxies forward `/api` and `/health` to port 3000. No second browser-side business store is used.
+- The quantity stepper improves the form experience, while the API independently validates all quantities and enforces the booking rules.
 
 ---
 

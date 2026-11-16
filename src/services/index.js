@@ -5,6 +5,7 @@
 import { createBookingService } from './bookingService.js';
 import { createEventService } from './eventService.js';
 import { createHealthService } from './healthService.js';
+import { createWaitlistService } from './waitlistService.js';
 
 export function createServices({ repository, paymentGateway, now } = {}) {
   if (!repository) throw new TypeError('createServices needs a repository');
@@ -13,5 +14,6 @@ export function createServices({ repository, paymentGateway, now } = {}) {
     health: createHealthService(),
     events: createEventService({ repository, now }),
     bookings: createBookingService({ repository, paymentGateway, now }),
+    waitlists: createWaitlistService({ repository, now }),
   });
 }

@@ -48,6 +48,19 @@ function bookingFromRow(row) {
   };
 }
 
+function waitlistEntryFromRow(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    eventId: row.event_id,
+    tierId: row.tier_id,
+    userId: row.user_id,
+    quantity: row.quantity,
+    customer: row.customer,
+    joinedAt: row.joined_at,
+  };
+}
+
 export function createSqliteRepository(database) {
   if (!database || typeof database.prepare !== 'function') {
     throw new TypeError('createSqliteRepository needs a SQLite database');
@@ -79,6 +92,12 @@ export function createSqliteRepository(database) {
       SET sold = sold + ?
       WHERE id = ? AND sold + ? <= capacity
     `),
+    reserveSeatsIfQueueEmpty: database.prepare(`
+      UPDATE ticket_tiers
+      SET sold = sold + ?
+      WHERE id = ? AND sold + ? <= capacity
+        AND NOT EXISTS (SELECT 1 FROM waitlist_entries WHERE tier_id = ?)
+    `),
     releaseSeats: database.prepare(`
       UPDATE ticket_tiers
       SET sold = sold - ?
@@ -102,6 +121,26 @@ export function createSqliteRepository(database) {
       UPDATE bookings
       SET status = ?, cancelled_at = ?, history_json = ?
       WHERE reference = ? AND status = ?
+    `),
+    insertWaitlistEntry: database.prepare(`
+      INSERT INTO waitlist_entries (
+        id, event_id, tier_id, user_id, quantity, customer, customer_key, joined_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(tier_id, customer_key) DO NOTHING
+    `),
+    listWaitlistForTier: database.prepare(`
+      SELECT * FROM waitlist_entries WHERE tier_id = ? ORDER BY rowid
+    `),
+    getWaitlistEntry: database.prepare('SELECT * FROM waitlist_entries WHERE id = ? AND tier_id = ?'),
+    getWaitlistHead: database.prepare(`
+      SELECT * FROM waitlist_entries WHERE tier_id = ? ORDER BY rowid LIMIT 1
+    `),
+    deleteWaitlistEntry: database.prepare(`
+      DELETE FROM waitlist_entries WHERE id = ? AND tier_id = ? AND user_id = ?
+    `),
+    deletePromotedWaitlistEntry: database.prepare(`
+      DELETE FROM waitlist_entries WHERE id = ? AND tier_id = ?
     `),
   });
 
@@ -151,8 +190,8 @@ export function createSqliteRepository(database) {
     async createBooking(booking) {
       database.exec('BEGIN IMMEDIATE');
       try {
-        const reservation = statements.reserveSeats.run(
-          booking.quantity, booking.tierId, booking.quantity,
+        const reservation = statements.reserveSeatsIfQueueEmpty.run(
+          booking.quantity, booking.tierId, booking.quantity, booking.tierId,
         );
         if (reservation.changes !== 1) {
           database.exec('ROLLBACK');
@@ -237,6 +276,106 @@ export function createSqliteRepository(database) {
 
         database.exec('COMMIT');
         return copy(booking);
+      } catch (error) {
+        database.exec('ROLLBACK');
+        throw error;
+      }
+    },
+
+    async listWaitlistForTier(tierId) {
+      return statements.listWaitlistForTier.all(tierId).map(waitlistEntryFromRow);
+    },
+
+    async createWaitlistEntry(entry, customerKey) {
+      database.exec('BEGIN IMMEDIATE');
+      try {
+        statements.insertUser.run(entry.userId, entry.joinedAt);
+        const result = statements.insertWaitlistEntry.run(
+          entry.id,
+          entry.eventId,
+          entry.tierId,
+          entry.userId,
+          entry.quantity,
+          entry.customer,
+          customerKey,
+          entry.joinedAt,
+        );
+        if (result.changes !== 1) {
+          database.exec('ROLLBACK');
+          return null;
+        }
+        database.exec('COMMIT');
+        return copy(entry);
+      } catch (error) {
+        database.exec('ROLLBACK');
+        throw error;
+      }
+    },
+
+    async removeWaitlistEntry(tierId, entryId, userId) {
+      database.exec('BEGIN IMMEDIATE');
+      try {
+        const row = statements.getWaitlistEntry.get(entryId, tierId);
+        if (!row) {
+          database.exec('ROLLBACK');
+          return null;
+        }
+        const deleted = statements.deleteWaitlistEntry.run(entryId, tierId, userId);
+        if (deleted.changes !== 1) {
+          database.exec('ROLLBACK');
+          return null;
+        }
+        const nextRow = statements.getWaitlistHead.get(tierId);
+        database.exec('COMMIT');
+        return {
+          removed: waitlistEntryFromRow(row),
+          nextInLine: waitlistEntryFromRow(nextRow),
+        };
+      } catch (error) {
+        database.exec('ROLLBACK');
+        throw error;
+      }
+    },
+
+    async promoteWaitlistEntry(tierId, entryId, booking) {
+      database.exec('BEGIN IMMEDIATE');
+      try {
+        const head = statements.getWaitlistHead.get(tierId);
+        if (!head || head.id !== entryId) {
+          database.exec('ROLLBACK');
+          return { status: 'changed' };
+        }
+
+        const reservation = statements.reserveSeats.run(
+          booking.quantity, tierId, booking.quantity,
+        );
+        if (reservation.changes !== 1) {
+          database.exec('ROLLBACK');
+          return { status: 'sold_out' };
+        }
+
+        statements.insertUser.run(booking.userId, booking.createdAt);
+        statements.insertBooking.run(
+          booking.id,
+          referenceKey(booking.reference),
+          booking.eventId,
+          booking.tierId,
+          booking.userId,
+          booking.quantity,
+          booking.customer,
+          booking.totalCents,
+          booking.status,
+          booking.createdAt,
+          booking.cancelledAt ?? null,
+          JSON.stringify(booking.history),
+        );
+        const deleted = statements.deletePromotedWaitlistEntry.run(entryId, tierId);
+        if (deleted.changes !== 1) {
+          database.exec('ROLLBACK');
+          return { status: 'changed' };
+        }
+        database.exec('COMMIT');
+        return { status: 'created', booking: copy(booking) };
       } catch (error) {
         database.exec('ROLLBACK');
         throw error;

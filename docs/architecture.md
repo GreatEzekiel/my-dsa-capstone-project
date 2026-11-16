@@ -27,6 +27,7 @@ flowchart TD
     subgraph services["2. Services  ·  src/services"]
         eventSvc["eventService"]
         bookingSvc["bookingService"]
+        waitlistSvc["waitlistService"]
         healthSvc["healthService"]
         later["payment, refund and check-in services<br/>(later builds)"]
     end
@@ -37,7 +38,7 @@ flowchart TD
     end
 
     subgraph data["4. Data  ·  src/repositories"]
-        repo[("SQLite repository<br/>events, tiers, bookings")]
+        repo[("SQLite repository<br/>events, tiers, bookings, waitlists")]
         memory["memory repository<br/>(service tests)"]
         schema["db/schema.sql<br/>constraints"]
     end
@@ -76,17 +77,19 @@ flowchart TD
 | `src/db` (SQLite setup/schema) | Node built-ins only |
 | `src/server.js` (composition root) | config, HTTP, repository, database, service and adapter construction |
 | `src/lib` (payment adapter) | Node built-ins only; it receives no card number |
-| `src/ui` (React) | `src/domain` for now (see below) |
+| `src/ui` (React) | `src/ui` and presentation-only `src/domain` helpers; reads and writes go through the REST API |
 
 **Where things are today.** The pure rules are separate files: `bookingStateMachine.js`, `eventSearch.js`,
 `sorting.js`, `dates.js`, `money.js`, `ids.js`, `waitlistQueue.js`. The API uses the asynchronous
 `repositories/sqlite.js` for persistent API data; `repositories/memory.js` remains available to service tests. The
-older `domain/inventory.js` remains the browser UI's local data layer. The services folder holds `eventService`,
-`bookingService` and `healthService`.
+terminal demos use `domain/inventory.js`; the React screen no longer uses that in-memory store. The services folder
+holds `eventService`, `bookingService`, `waitlistService` and `healthService`.
 The booking service receives the mock gateway through dependency injection; the gateway never sees card data.
 
-**The React screen** (`src/ui`) is a separate client. The API persists event and booking routes in SQLite, but the screen
-still runs the domain in the browser; switching it to call the HTTP API (and dropping the domain import) is a later step.
+**The React screen** (`src/ui`) is a REST client. It loads events, event details, waitlists and bookings with `fetch`,
+and sends search, booking, cancellation and waitlist actions to the server. `src/ui/api.js` adds the demo `x-user-id`,
+parses standard JSON errors and reports network failures. Vite proxies `/api` and `/health` to port 3000 in development
+and preview; the production UI uses same-origin routes. SQLite is the source of truth across browser sessions and server restarts.
 
 **The journey of `GET /health`:** the client sends the request, `app.js` finds the route in the router, the route handler calls
 `services.health.check()`, the service returns `{ status: 'ok' }`, and `app.js` writes it as JSON. If anything throws,
@@ -143,9 +146,12 @@ erDiagram
     }
     WAITLIST_ENTRY {
         string id PK
+        string eventId FK
         string tierId FK
+        string userId FK "created from x-user-id; not authentication"
         string customer
         int quantity
+        string customerKey "normalized; unique per tier"
         string joinedAt "ISO 8601"
     }
 ```
@@ -159,7 +165,8 @@ Notes:
 - **Drafts are private.** Only `published` events are public and bookable.
 - **Dates are ISO 8601 strings.** A time with no zone means Lagos time (+01:00).
 - **SQLite enforces persistence constraints.** Primary/foreign keys, unique booking references and range/status checks are in `src/db/schema.sql`; seat reservations use one conditional update inside a transaction.
-- **The waitlist is not persisted in Build 5.** Its diagram entry is carried forward from the domain model; SQLite tables and API waitlist routes are later work.
+- **Waitlists are persisted in SQLite.** Entries are ordered FIFO by join time, and `(tier_id, customer_key)` is unique. Promoting the queue head reserves seats, creates the pending booking, and removes that entry in one transaction.
+- **The attendee ID is a demo identity, not authentication.** The browser persists a generated `x-user-id` in local storage so it can identify its own bookings and waitlist entries.
 
 ---
 
@@ -215,6 +222,7 @@ Built on `node:http` only, with no outside packages.
 | `GET /health` | `200 {"status":"ok"}` |
 | `POST /api/events`, `GET /api/events`, `GET /api/events/:id`, `POST /api/events/:id/tiers\|publish\|unpublish` | the event routes (see [api.md](api.md)) |
 | `POST /api/bookings`, `GET /api/bookings/:reference`, `POST /api/bookings/:reference/pay`, `POST /api/bookings/:reference/cancel` | the booking routes |
+| `GET /api/events/:id/waitlists`, `POST /api/events/:eventId/tiers/:tierId/waitlist`, `DELETE /api/events/:eventId/tiers/:tierId/waitlist/:entryId`, `POST /api/events/:eventId/tiers/:tierId/waitlist/next/book` | persistent FIFO waitlist routes; owner identity is checked for leaving and booking the queue head |
 | `POST /api/dev/bookings/:reference/transition` | **demo mode only** (`npm run start:demo`): a practice route for the state machine |
 | any unknown `/api/...` path | `404 {"error":{"code":"NOT_FOUND","message":"..."}}` |
 | a known path with the wrong method | `405` + an `Allow` header |
@@ -225,8 +233,8 @@ Built on `node:http` only, with no outside packages.
 | any bug on the server | `500 {"error":{"code":"INTERNAL","message":"Something went wrong"}}`, with the stack trace in the **server log only** |
 
 How a `POST /api/bookings` travels: `app.js` reads the JSON body, the router finds the route, the route calls `services.bookings.book(body)`,
-the service calls `bookTickets` (the data layer), which asks the rules (is the event published? are there enough seats? is anyone waiting?).
-A `SOLD_OUT` error travels back up, and `app.js` turns it into `409 {"error":{"code":"SOLD_OUT",...}}`.
+the service checks the event, tier, queue and requested quantity, and the injected SQLite repository reserves capacity atomically. A
+`SOLD_OUT` error travels back up, and `app.js` turns it into `409 {"error":{"code":"SOLD_OUT",...}}`.
 
 **One error shape, everywhere:** `{ "error": { "code": "...", "message": "..." } }`, nothing more, nothing less.
 A domain error maps to an HTTP status through one table (`src/http/errors.js`), for example `VALIDATION` is `400`,

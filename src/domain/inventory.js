@@ -15,6 +15,7 @@ import { EventStatus } from './eventStatus.js';
 import { isMoney } from './money.js';
 import { MAX_PRICE_CENTS, MAX_TICKETS_PER_BOOKING, MIN_TICKETS } from './ticketLimits.js';
 import { Queue } from './waitlistQueue.js';
+import { normalizeWaitlistName } from './waitlistRules.js';
 
 export { MAX_PRICE_CENTS, MAX_TICKETS_PER_BOOKING, MIN_TICKETS } from './ticketLimits.js';
 
@@ -56,7 +57,6 @@ const quantityOf = (q) => whole(q, 'quantity', MIN_TICKETS, MAX_TICKETS_PER_BOOK
 
 // "Ada  Obi" and "ada obi" are the same person for the "already waiting" rule.
 // (Build 1 has no accounts, so a name is the only identity we have.)
-const nameKey = (name) => name.toLowerCase().replace(/\s+/g, ' ');
 
 // ---------- the store ----------
 
@@ -369,7 +369,7 @@ export function joinWaitlist(store, input) {
     throw new DomainError(ErrorCode.SEATS_AVAILABLE, `${tier.name} has seats, book directly`, { tierId });
   }
   // One place in line per person. Queue is O(n) to scan; waitlists are short, so this is fine.
-  if ([...queue].some((e) => nameKey(e.customer) === nameKey(name))) {
+  if ([...queue].some((e) => normalizeWaitlistName(e.customer) === normalizeWaitlistName(name))) {
     throw new DomainError(ErrorCode.ALREADY_WAITING, `${name} is already on the ${tier.name} waitlist`, { tierId });
   }
   const entry = Object.freeze({ id: newId(), eventId: tier.eventId, tierId: tier.id, quantity: qty, customer: name, joinedAt: new Date(state.now()).toISOString() });

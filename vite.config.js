@@ -8,6 +8,18 @@ import tailwindcss from '@tailwindcss/vite'; // Tailwind v4 plugin: generates on
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  server: {
+    proxy: {
+      '/api': 'http://127.0.0.1:3000',
+      '/health': 'http://127.0.0.1:3000',
+    },
+  },
+  preview: {
+    proxy: {
+      '/api': 'http://127.0.0.1:3000',
+      '/health': 'http://127.0.0.1:3000',
+    },
+  },
   test: {
     environment: 'jsdom', // a fake browser inside Node, so React can render and be clicked in tests
     include: ['test/ui/**/*.test.jsx'], // only UI tests; the domain tests use node:test instead

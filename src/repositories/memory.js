@@ -2,11 +2,13 @@ import { holdsSeats } from '../domain/bookingStateMachine.js';
 import { referenceKey } from '../domain/ids.js';
 
 const copy = (value) => (value === null || value === undefined ? value : structuredClone(value));
+const publicWaitlistEntry = ({ customerKey, ...entry }) => copy(entry);
 
 export function createMemoryRepository() {
   const events = new Map();
   const tiers = new Map();
   const bookings = new Map();
+  const waitlists = new Map();
 
   return Object.freeze({
     async createEvent(event) {
@@ -53,7 +55,8 @@ export function createMemoryRepository() {
       const key = referenceKey(booking.reference);
       if (bookings.has(key)) throw new Error(`Duplicate booking reference: ${booking.reference}`);
       const tier = tiers.get(booking.tierId);
-      if (!tier || booking.quantity > tier.capacity - tier.sold) return null;
+      if (!tier || (waitlists.get(booking.tierId)?.length ?? 0) > 0
+        || booking.quantity > tier.capacity - tier.sold) return null;
 
       tier.sold += booking.quantity;
       bookings.set(key, copy(booking));
@@ -89,6 +92,43 @@ export function createMemoryRepository() {
 
       bookings.set(key, copy(booking));
       return copy(booking);
+    },
+
+    async listWaitlistForTier(tierId) {
+      return (waitlists.get(tierId) ?? []).map(publicWaitlistEntry);
+    },
+
+    async createWaitlistEntry(entry, customerKey) {
+      const queue = waitlists.get(entry.tierId) ?? [];
+      if (queue.some((item) => item.customerKey === customerKey)) return null;
+      queue.push({ ...copy(entry), customerKey });
+      waitlists.set(entry.tierId, queue);
+      return copy(entry);
+    },
+
+    async removeWaitlistEntry(tierId, entryId, userId) {
+      const queue = waitlists.get(tierId) ?? [];
+      const index = queue.findIndex((entry) => entry.id === entryId && entry.userId === userId);
+      if (index < 0) return null;
+      const [removed] = queue.splice(index, 1);
+      const next = queue[0] ?? null;
+      return {
+        removed: publicWaitlistEntry(removed),
+        nextInLine: next ? publicWaitlistEntry(next) : null,
+      };
+    },
+
+    async promoteWaitlistEntry(tierId, entryId, booking) {
+      const queue = waitlists.get(tierId) ?? [];
+      if (queue[0]?.id !== entryId) return { status: 'changed' };
+      const tier = tiers.get(tierId);
+      if (!tier || booking.quantity > tier.capacity - tier.sold) return { status: 'sold_out' };
+      const key = referenceKey(booking.reference);
+      if (bookings.has(key)) throw new Error(`Duplicate booking reference: ${booking.reference}`);
+      tier.sold += booking.quantity;
+      bookings.set(key, copy(booking));
+      queue.shift();
+      return { status: 'created', booking: copy(booking) };
     },
   });
 }

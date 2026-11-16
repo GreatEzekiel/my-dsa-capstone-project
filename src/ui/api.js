@@ -1,0 +1,55 @@
+const USER_ID_KEY = 'event-ticketing-user-id';
+
+export class ApiError extends Error {
+  constructor(code, message, status) {
+    super(message);
+    this.name = 'ApiError';
+    this.code = code;
+    this.status = status;
+  }
+}
+
+export function getUiUserId() {
+  let userId = localStorage.getItem(USER_ID_KEY);
+  if (!userId) {
+    userId = `attendee-${globalThis.crypto.randomUUID()}`;
+    localStorage.setItem(USER_ID_KEY, userId);
+  }
+  return userId;
+}
+
+export async function requestJson(path, { method = 'GET', body, signal, userId } = {}) {
+  let response;
+  try {
+    response = await fetch(path, {
+      method,
+      signal,
+      headers: {
+        ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+        ...(userId ? { 'x-user-id': userId } : {}),
+      },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+  } catch (error) {
+    if (error?.name === 'AbortError') throw error;
+    throw new ApiError('NETWORK_ERROR', 'Could not reach the API. Start the server and try again.', 0);
+  }
+
+  const text = await response.text();
+  let payload;
+  try {
+    payload = text === '' ? {} : JSON.parse(text);
+  } catch {
+    throw new ApiError('BAD_RESPONSE', `The API returned invalid JSON (${response.status})`, response.status);
+  }
+
+  if (!response.ok) {
+    const error = payload?.error;
+    throw new ApiError(
+      typeof error?.code === 'string' ? error.code : 'BAD_RESPONSE',
+      typeof error?.message === 'string' ? error.message : `The API request failed (${response.status})`,
+      response.status,
+    );
+  }
+  return payload;
+}
