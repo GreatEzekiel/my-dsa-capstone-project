@@ -1,4 +1,4 @@
-const USER_ID_KEY = 'event-ticketing-user-id';
+import { getSession } from './session.js';
 
 export class ApiError extends Error {
   constructor(code, message, status) {
@@ -17,24 +17,16 @@ function unavailableApi(status) {
   );
 }
 
-export function getUiUserId() {
-  let userId = localStorage.getItem(USER_ID_KEY);
-  if (!userId) {
-    userId = `attendee-${globalThis.crypto.randomUUID()}`;
-    localStorage.setItem(USER_ID_KEY, userId);
-  }
-  return userId;
-}
-
-export async function requestJson(path, { method = 'GET', body, signal, userId } = {}) {
+export async function requestJson(path, { method = 'GET', body, signal } = {}) {
   let response;
   try {
+    const session = getSession();
     response = await fetch(path, {
       method,
       signal,
       headers: {
         ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
-        ...(userId ? { 'x-user-id': userId } : {}),
+        ...(session?.token ? { Authorization: `Bearer ${session.token}` } : {}),
       },
       body: body === undefined ? undefined : JSON.stringify(body),
     });

@@ -26,6 +26,12 @@ function requireEvent(event) {
   return event;
 }
 
+function requireOwner(event, userId) {
+  if (userId !== undefined && event.organizerId !== userId) {
+    throw new DomainError(ErrorCode.FORBIDDEN, 'You can only change your own events');
+  }
+}
+
 function toWhole(value) {
   return value !== undefined && /^\d+$/.test(value) ? Number(value) : value;
 }
@@ -56,20 +62,28 @@ export function createEventService({ repository, now = () => Date.now() }) {
   if (!repository) throw new TypeError('createEventService needs a repository');
 
   async function details(event) {
+    const publicEvent = { ...event };
+    delete publicEvent.organizerId;
     const tiers = await Promise.all((await repository.listTiersForEvent(event.id)).map(async (tier) => ({
       ...tier,
       seatsLeft: tier.capacity - tier.sold,
       waitlistSize: (await repository.listWaitlistForTier(tier.id)).length,
     })));
     return {
-      ...event,
+      ...publicEvent,
       started: parseWhen(event.startsAt, 'startsAt') <= now(),
       tiers,
     };
   }
 
   return Object.freeze({
-    async create(input) {
+    async listForOrganizer(organizerId) {
+      const ownerId = id(organizerId, 'organizerId');
+      const owned = (await repository.listEvents()).filter((event) => event.organizerId === ownerId);
+      return Promise.all(owned.map(details));
+    },
+
+    async create(input, organizerId) {
       const data = asObject(input);
       const event = {
         id: newId(),
@@ -78,6 +92,7 @@ export function createEventService({ repository, now = () => Date.now() }) {
         venue: text(data.venue, 'venue'),
         startsAt: text(data.startsAt ?? data.date, 'startsAt'),
         status: EventStatus.DRAFT,
+        ...(organizerId === undefined ? {} : { organizerId }),
       };
       parseWhen(event.startsAt, 'startsAt');
       return details(await repository.createEvent(event));
@@ -87,8 +102,9 @@ export function createEventService({ repository, now = () => Date.now() }) {
       return details(requireEvent(await repository.getEvent(id(eventId, 'eventId'))));
     },
 
-    async addTier(eventId, input) {
+    async addTier(eventId, input, organizerId) {
       const event = requireEvent(await repository.getEvent(id(eventId, 'eventId')));
+      requireOwner(event, organizerId);
       const data = asObject(input);
       const name = text(data.name, 'name');
       if (!isMoney(data.priceCents) || data.priceCents > MAX_PRICE_CENTS) {
@@ -108,16 +124,18 @@ export function createEventService({ repository, now = () => Date.now() }) {
       return { ...tier, seatsLeft: tier.capacity, waitlistSize: 0 };
     },
 
-    async publish(eventId) {
+    async publish(eventId, organizerId) {
       const event = requireEvent(await repository.getEvent(id(eventId, 'eventId')));
+      requireOwner(event, organizerId);
       if ((await repository.listTiersForEvent(event.id)).length === 0) {
         throw new DomainError(ErrorCode.INVALID_STATE, `Add at least one ticket tier to ${event.title} before publishing`, { eventId });
       }
       return details(await repository.saveEvent({ ...event, status: EventStatus.PUBLISHED }));
     },
 
-    async unpublish(eventId) {
+    async unpublish(eventId, organizerId) {
       const event = requireEvent(await repository.getEvent(id(eventId, 'eventId')));
+      requireOwner(event, organizerId);
       return details(await repository.saveEvent({ ...event, status: EventStatus.DRAFT }));
     },
 

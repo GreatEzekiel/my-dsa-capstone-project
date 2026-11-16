@@ -23,8 +23,15 @@ function publicEntry(entry) {
   return visible;
 }
 
-export function createWaitlistService({ repository, now = () => Date.now() }) {
+export function createWaitlistService({
+  repository,
+  now = () => Date.now(),
+  bookingHoldMs = 24 * 60 * 60 * 1000,
+}) {
   if (!repository) throw new TypeError('createWaitlistService needs a repository');
+  if (!Number.isSafeInteger(bookingHoldMs) || bookingHoldMs < 1) {
+    throw new TypeError('createWaitlistService needs a positive booking hold duration');
+  }
 
   async function getTier(eventId, tierId) {
     const event = await repository.getEvent(eventId);
@@ -46,28 +53,39 @@ export function createWaitlistService({ repository, now = () => Date.now() }) {
   }
 
   return Object.freeze({
-    async listForEvent(rawEventId, rawUserId) {
+    async listForEvent(rawEventId, rawUserId, role) {
       const eventId = id(rawEventId, 'eventId');
-      if (!await repository.getEvent(eventId)) {
-        throw new DomainError(ErrorCode.NOT_FOUND, 'Event not found', { eventId });
-      }
+      const event = await repository.getEvent(eventId);
+      if (!event) throw new DomainError(ErrorCode.NOT_FOUND, 'Event not found', { eventId });
       const userId = typeof rawUserId === 'string' ? rawUserId : '';
+      if (role === 'organizer' && event.organizerId !== userId) {
+        throw new DomainError(ErrorCode.FORBIDDEN, 'You can only view waitlists for your own events');
+      }
+      if (role !== 'organizer' && role !== 'attendee') {
+        throw new DomainError(ErrorCode.FORBIDDEN, 'Your account does not have permission to view waitlists');
+      }
       const tiers = await repository.listTiersForEvent(eventId);
-      const waitlists = await Promise.all(tiers.map(async (tier) => ({
-        tierId: tier.id,
-        entries: (await repository.listWaitlistForTier(tier.id)).map((entry, index) => ({
-          ...publicEntry(entry),
-          position: index + 1,
-          isMine: entry.userId === userId,
-        })),
-      })));
+      const waitlists = await Promise.all(tiers.map(async (tier) => {
+        const entries = await repository.listWaitlistForTier(tier.id);
+        return {
+          tierId: tier.id,
+          entries: entries
+            .map((entry, index) => ({ entry, position: index + 1 }))
+            .filter(({ entry }) => role === 'organizer' || entry.userId === userId)
+            .map(({ entry, position }) => ({
+              ...publicEntry(entry),
+              position,
+              isMine: entry.userId === userId,
+            })),
+        };
+      }));
       return { waitlists };
     },
 
     async join(rawEventId, rawTierId, input, rawUserId) {
       const eventId = id(rawEventId, 'eventId');
       const tierId = id(rawTierId, 'tierId');
-      const userId = text(rawUserId, 'x-user-id');
+      const userId = text(rawUserId, 'userId');
       const data = asObject(input);
       const customer = text(data.customer, 'customer');
       const quantity = data.quantity;
@@ -111,7 +129,7 @@ export function createWaitlistService({ repository, now = () => Date.now() }) {
       const eventId = id(rawEventId, 'eventId');
       const tierId = id(rawTierId, 'tierId');
       const entryId = id(rawEntryId, 'entryId');
-      const userId = text(rawUserId, 'x-user-id');
+      const userId = text(rawUserId, 'userId');
       await getTier(eventId, tierId);
 
       const result = await repository.removeWaitlistEntry(tierId, entryId, userId);
@@ -125,7 +143,7 @@ export function createWaitlistService({ repository, now = () => Date.now() }) {
     async bookNext(rawEventId, rawTierId, rawUserId) {
       const eventId = id(rawEventId, 'eventId');
       const tierId = id(rawTierId, 'tierId');
-      const userId = text(rawUserId, 'x-user-id');
+      const userId = text(rawUserId, 'userId');
       const { event, tier } = await getTier(eventId, tierId);
       assertBookable(event);
       const queue = await repository.listWaitlistForTier(tierId);
@@ -156,6 +174,7 @@ export function createWaitlistService({ repository, now = () => Date.now() }) {
         totalCents: tier.priceCents * head.quantity,
         status: BookingState.PENDING,
         createdAt,
+        expiresAt: new Date(now() + bookingHoldMs).toISOString(),
         history: [{ status: BookingState.PENDING, at: createdAt }],
       };
       const result = await repository.promoteWaitlistEntry(tierId, head.id, booking);

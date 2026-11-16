@@ -141,7 +141,7 @@ describe('the booking API', () => {
 
     test('an event that has already started -> 409 EVENT_STARTED', async () => {
       let now = Date.now();
-      const clocked = await startApp({ now: () => now });
+      const clocked = await startApp({ now: () => now, authNow: () => Date.now() });
       try {
         const c = apiClient(clocked.url);
         const event = (await c.post('/api/events', { title: 'Soon', city: 'Lagos', venue: 'V', startsAt: new Date(now + 3_600_000).toISOString() })).body.event;
@@ -159,7 +159,7 @@ describe('the booking API', () => {
     test('PUT and DELETE on this URL are 405 (Allow: POST)', async () => {
       const res = await api.call('DELETE', '/api/bookings', {});
       expectError(res, 405, 'METHOD_NOT_ALLOWED');
-      assert.equal(res.headers.get('allow'), 'POST');
+      assert.equal(res.headers.get('allow'), 'GET, HEAD, POST');
     });
   });
 
@@ -231,14 +231,14 @@ describe('the booking API', () => {
       assert.equal('userId' in response.body.booking, false);
     });
 
-    test('booking requires x-user-id from the request header', async () => {
+    test('booking requires a valid bearer token', async () => {
       const response = await fetch(`${server.url}/api/bookings`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ eventId: 'event', tierId: 'tier', quantity: 1, customer: 'Ada' }),
       });
       const text = await response.text();
-      expectError({ status: response.status, body: JSON.parse(text), text }, 400, 'VALIDATION');
+      expectError({ status: response.status, body: JSON.parse(text), text }, 401, 'UNAUTHENTICATED');
     });
 
     test('a paid booking cannot be charged again', async () => {
@@ -297,8 +297,8 @@ describe('the booking API', () => {
       const { booking } = (await book(1)).body;
       expectError(
         await api.post(`/api/bookings/${booking.reference}/pay`, { mockResult: 'success' }, { 'x-user-id': 'someone-else' }),
-        404,
-        'NOT_FOUND',
+        403,
+        'FORBIDDEN',
       );
       assert.equal((await api.get(`/api/bookings/${booking.reference}`)).body.booking.status, 'pending');
     });
@@ -366,8 +366,8 @@ describe('the booking API', () => {
       const { booking } = (await book(1)).body;
       expectError(
         await api.post(`/api/bookings/${booking.reference}/cancel`, {}, { 'x-user-id': 'someone-else' }),
-        404,
-        'NOT_FOUND',
+        403,
+        'FORBIDDEN',
       );
       assert.equal((await api.get(`/api/bookings/${booking.reference}`)).body.booking.status, 'pending');
     });

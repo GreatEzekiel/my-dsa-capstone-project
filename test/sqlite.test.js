@@ -83,7 +83,11 @@ test('the seed script fills an empty database once and leaves existing data unch
   try {
     const runSeed = () => spawnSync(process.execPath, [SEED_SCRIPT], {
       encoding: 'utf8',
-      env: { ...process.env, DATABASE_PATH: databasePath },
+      env: {
+        ...process.env,
+        DATABASE_PATH: databasePath,
+        AUTH_TOKEN_SECRET: 'test-token-secret-for-integration-tests-only',
+      },
     });
     const first = runSeed();
     assert.equal(first.status, 0, first.stderr);

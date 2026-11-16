@@ -2,16 +2,22 @@
 
 All bodies and answers are JSON. Money is **whole kobo** (`500000` = ₦5,000.00). Dates are ISO strings
 (`2026-12-05T18:00:00+01:00`; a time with no zone means Lagos time). Test everything with Postman: see [postman.md](postman.md).
-Start the server with `npm start` or `npm run start:demo` (the latter seeds 4 sample events + 1 draft only when the database is empty, and enables the practice route in the last section).
+Start the server with `npm start` or `npm run start:demo` (the latter seeds 4 sample events + 1 draft only when the database is empty, and enables the staff-only practice route).
 The API persists data in SQLite at `data/event-ticketing.sqlite` by default; set `DATABASE_PATH` to choose another file.
 `npm run seed` adds the demo events only when the configured database has no events. Data survives server restarts.
-Booking creation, payment, cancellation and waitlist actions use the `x-user-id` header as a temporary caller identity; it is not authentication.
+Except for health checks, public event search and event reads, API actions require `Authorization: Bearer <token>`.
+Create attendee and organizer accounts with the auth endpoints below. Staff accounts are provisioned by an administrator;
+the public signup endpoint does not accept the staff role. Tokens expire after one hour, and `AUTH_TOKEN_SECRET` must
+be set to a stable secret of at least 32 bytes before starting the server.
 
 ## The requests at a glance
 
 | Method | Path | What it does | Success |
 |--------|------|--------------|---------|
 | `GET` | `/health` | Is the server alive? | `200` |
+| `POST` | `/api/auth/signup` | Create an attendee or organizer account | `201` |
+| `POST` | `/api/auth/login` | Sign in and receive a bearer token | `200` |
+| `GET` | `/api/auth/me` | Read the signed-in account | `200` |
 | `POST` | `/api/events` | Create an event (a private **draft**) | `201` + `Location` |
 | `GET` | `/api/events` | Search the **published** events | `200` |
 | `GET` | `/api/events/:id` | One event with its tiers | `200` |
@@ -26,7 +32,8 @@ Booking creation, payment, cancellation and waitlist actions use the `x-user-id`
 | `GET` | `/api/bookings/:reference` | Find a booking by its code | `200` |
 | `POST` | `/api/bookings/:reference/pay` | Pay with the mock gateway | `200` |
 | `POST` | `/api/bookings/:reference/cancel` | Cancel an unpaid booking and give the seats back | `200` |
-| `POST` | `/api/dev/bookings/:reference/transition` | **Practice only (demo mode)**: move a booking along its life cycle | `200` |
+| `GET` | `/api/bookings` | List the signed-in attendee's bookings | `200` |
+| `POST` | `/api/dev/bookings/:reference/transition` | **Demo mode only**: staff practice route for state-machine moves | `200` |
 
 **Errors always look like this**, with a status that matches the code:
 
@@ -38,6 +45,8 @@ Booking creation, payment, cancellation and waitlist actions use the `x-user-id`
 |:------:|-------|---------|
 | `400` | `VALIDATION`, `BAD_JSON`, `BAD_REQUEST` | Your request is wrong: fix it and send it again |
 | `404` | `NOT_FOUND` | No such event, booking, route or file |
+| `401` | `UNAUTHENTICATED` | Missing, invalid or expired bearer token |
+| `403` | `FORBIDDEN` | The authenticated user lacks the required role or ownership |
 | `402` | `PAYMENT_DECLINED` | The mock payment was declined; the booking remains pending |
 | `405` | `METHOD_NOT_ALLOWED` | The path exists, but not with this method (see the `Allow` header) |
 | `409` | `SOLD_OUT`, `ALREADY_CANCELLED`, `INVALID_STATE`, `INVALID_TRANSITION`, `EVENT_STARTED`, `SEATS_AVAILABLE`, `WAITLIST_FIRST`, `ALREADY_WAITING` | Your request is fine, but it clashes with the **current state** of things |
@@ -46,9 +55,39 @@ Booking creation, payment, cancellation and waitlist actions use the `x-user-id`
 
 ---
 
+## Authentication
+
+### `POST /api/auth/signup`
+
+```json
+{ "email": "organizer@example.com", "password": "correct-horse", "role": "organizer" }
+```
+
+Only `attendee` and `organizer` roles may be created through public signup. Passwords must be at least 8 characters;
+only a salted scrypt hash is stored. A successful response contains the public user profile and an expiring token;
+the password and password hash are never returned. A duplicate email returns `409 EMAIL_TAKEN`.
+
+### `POST /api/auth/login`
+
+```json
+{ "email": "organizer@example.com", "password": "correct-horse" }
+```
+
+Successful login returns the user profile and a one-hour HS256 bearer token. An unknown email and a wrong password
+both return `401 INVALID_CREDENTIALS` with the same message.
+
+### Protected requests
+
+Send `Authorization: Bearer <token>` on every non-public API request. `GET /api/auth/me` returns the authenticated
+profile. Missing, edited, expired, or non-HS256 tokens return `401 UNAUTHENTICATED`. Attendees may manage only their
+own bookings; organizers may change only their own events. A different user's booking returns `403 FORBIDDEN`.
+Only a trusted administrator may provision a staff account with `npm run create:staff`.
+
 ## Events
 
 ### `POST /api/events`: create an event (S02)
+
+Requires an organizer bearer token.
 
 ```json
 { "title": "Lagos Tech Meetup", "city": "Lagos", "venue": "Landmark Centre", "startsAt": "2026-12-05T18:00:00+01:00" }
@@ -66,6 +105,8 @@ Booking creation, payment, cancellation and waitlist actions use the `x-user-id`
 `200 { "event": { …as above, with "tiers": [ … ] } }`, or `404 NOT_FOUND`. A draft can be read by its id: drafts are hidden from the **list**, they are not secret.
 
 ### `POST /api/events/:id/tiers`: add a ticket tier (S03)
+
+Requires the owning organizer's bearer token.
 ```json
 { "name": "General", "priceCents": 500000, "capacity": 100 }
 ```
@@ -76,6 +117,8 @@ Booking creation, payment, cancellation and waitlist actions use the `x-user-id`
 A price that is not a whole number, or a capacity below 1, is `400 VALIDATION`; an unknown event is `404`.
 
 ### `POST /api/events/:id/publish` and `/unpublish` (S04)
+
+Requires the owning organizer's bearer token.
 No body. `200 { "event": { …, "status": "published" } }` (or `"draft"`).
 Publishing an event with **no tiers** is `409 INVALID_STATE`. Unpublishing keeps the bookings that already exist; it only stops **new** ones.
 
@@ -103,15 +146,14 @@ Options combine (an event must pass all of them). An **empty** value (`?city=`) 
 
 ## Waitlists
 
-Every waitlist request needs the caller's `x-user-id`. The value is a temporary demo identity, not authentication.
-The browser stores its generated ID in local storage so the same attendee can see and manage their own entries.
+Waitlist participation requires an attendee bearer token. Organizers may read waitlists for their own events.
 
 ### `GET /api/events/:id/waitlists`
 
 Returns one queue per tier, in FIFO order. Each entry includes `position` and `isMine`; internal user IDs are not returned.
 
 ```sh
-curl -sS "$BASE/api/events/$EVENT_ID/waitlists" -H "x-user-id: $USER_ID"
+curl -sS "$BASE/api/events/$EVENT_ID/waitlists" -H "Authorization: Bearer $TOKEN"
 ```
 
 ### `POST /api/events/:eventId/tiers/:tierId/waitlist`
@@ -126,7 +168,7 @@ per tier (`409 ALREADY_WAITING`).
 
 ### `DELETE /api/events/:eventId/tiers/:tierId/waitlist/:entryId`
 
-Remove the caller's own entry. A different caller receives `404 NOT_FOUND`; the response names the removed entry and
+Remove the caller's own entry. A different caller receives `403 FORBIDDEN`; the response names the removed entry and
 the next person, if any.
 
 ### `POST /api/events/:eventId/tiers/:tierId/waitlist/next/book`
@@ -140,14 +182,16 @@ available, it returns `409 SOLD_OUT` without skipping the head or changing the q
 ## Bookings
 
 ### `POST /api/bookings`: book tickets (S06)
+
+Requires an attendee bearer token.
 ```json
 { "eventId": "3f0c…", "tierId": "9a1b…", "quantity": 2, "customer": "Ada Obi" }
 ```
-Send `x-user-id: attendee-1` with this request. The header value, not any body field, is the temporary owner identity.
+Send the attendee's bearer token; the authenticated token identity, not any body field, is the booking owner.
 `201 Created`, header `Location: /api/bookings/7K2M-9Q4X`:
 ```json
 { "booking": { "id": "c5d2…", "reference": "7K2M-9Q4X", "eventId": "3f0c…", "tierId": "9a1b…", "quantity": 2,
-               "customer": "Ada Obi", "totalCents": 1000000, "status": "pending", "createdAt": "…",
+               "customer": "Ada Obi", "totalCents": 1000000, "status": "pending", "createdAt": "…", "expiresAt": "…",
                "history": [ { "status": "pending", "at": "…" } ] } }
 ```
 | Situation | Answer |
@@ -162,13 +206,15 @@ Send `x-user-id: attendee-1` with this request. The header value, not any body f
 The booking starts as `pending` and the seats are held. `status`, `totalCents`, `reference` and `id` are chosen **by the server**: if you send them, they are ignored.
 **Many requests at once can't oversell:** 50 people booking the last seat at the same moment get exactly 1 booking and 49 `SOLD_OUT` (tested by `test/oversell.test.js`).
 
-### `GET /api/bookings/:reference`
-`200 { "booking": { … } }` or `404`. Capitals, spaces and the hyphen don't matter (`7k2m9q4x` works), and `O`/`I`/`L` are read as `0`/`1`.
-**Treat the reference like a password:** it is the only thing protecting a booking's details.
+### `GET /api/bookings` and `GET /api/bookings/:reference`
+
+Both require the attendee's bearer token. The list includes only that attendee's bookings. Reading another attendee's
+booking returns `403 FORBIDDEN`; a reference alone is not authorization. Capitals, spaces and the hyphen don't matter
+(`7k2m9q4x` works), and `O`/`I`/`L` are read as `0`/`1`.
 
 ### `POST /api/bookings/:reference/pay` (S07)
 
-Send `x-user-id` for the caller and one of these mock requests:
+Send the attendee's bearer token and one of these mock requests:
 
 ```json
 { "mockResult": "success" }
@@ -177,39 +223,38 @@ Send `x-user-id` for the caller and one of these mock requests:
 `200 { "booking": { …, "status": "paid", "reference": "7K2M-9Q4X" } }`.
 `{ "mockResult": "declined" }` returns `402 PAYMENT_DECLINED`; the booking stays pending and may be retried.
 Omitting `mockResult` means success. The API rejects any other payment fields (including card details); the gateway
-receives only a booking ID and whether the mock result should decline. Only the booking owner can pay. A mismatch is
-`404 NOT_FOUND`. Paying a cancelled or already-paid booking is `409 INVALID_TRANSITION`; a second charge is not made.
+receives only a booking ID and whether the mock result should decline. Only the booking owner can pay. A mismatch is `403 FORBIDDEN`. Paying a cancelled or already-paid booking is
+`409 INVALID_TRANSITION`; a second charge is not made.
 
 ### `POST /api/bookings/:reference/cancel`
-Send the owner's `x-user-id` header. Only a pending booking may be cancelled in this build. `200`:
+Send the owner's bearer token. Only a pending booking may be cancelled in this build. `200`:
 ```json
 { "booking": { …, "status": "cancelled", "history": [ { "status": "pending" }, { "status": "cancelled" } ] }, "seatsLeft": 3 }
 ```
-Cancelling twice is `409 ALREADY_CANCELLED` (the seats are not given back twice). A non-owner receives `404 NOT_FOUND`;
+Cancelling twice is `409 ALREADY_CANCELLED` (the seats are not given back twice). A non-owner receives `403 FORBIDDEN`;
 paid, refunded or checked-in bookings can't be cancelled in this build (`409 INVALID_TRANSITION`).
 The answer deliberately does **not** say who is next on the waitlist: that is another customer's name.
 
 ---
 
+---
+
 ## Practice only: `POST /api/dev/bookings/:reference/transition`
 
-Only in **demo mode** (`npm run start:demo`). In a normal start this URL is an unknown path (`404`).
+Only registered in demo mode (`npm run start:demo`), and requires a staff bearer token. A normal server responds
+`404 NOT_FOUND`. This route is for exercising the state machine, not a way to pay a real booking.
+
 ```json
 { "to": "paid" }
 ```
-It moves a booking along the life cycle (`pending`, `paid`, `cancelled`, `refunded`, `checked_in`), and the state machine refuses illegal moves:
 
-| Request | Answer |
-|---------|--------|
-| `pending → paid`, `paid → checked_in`, `paid → refunded`, `paid → cancelled`, `pending → cancelled` | `200` |
-| **`cancelled → paid`** (paying a cancelled booking) | `409 INVALID_TRANSITION`: *"A cancelled booking cannot become paid: cancelled is final, nothing can leave it"* |
-| any other of the 25 moves | `409 INVALID_TRANSITION`, and nothing changes |
-| `to` missing or not text | `400 VALIDATION` |
-
-**Why only in demo mode?** Left open, anyone could mark a booking as paid for free. The real payment, refund and check-in stories (S07, S09, S10) will replace this with proper requests that check who is asking and whether money really moved.
+The route accepts the five lifecycle states and returns `409 INVALID_TRANSITION` for any illegal move, without changing
+the booking. Staff tokens are created only with the trusted `npm run create:staff` command.
 
 ---
 
 ## Not built yet (on purpose)
 
-No logins (the `x-user-id` value is not authenticated), no paging, no rate limiting or CORS. The React UI uses the API through Vite's development proxy; production hosting still needs to serve the UI and API from the same origin. `docs/ai-log.md` lists the project decisions.
+No paging, rate limiting or CORS. Staff provisioning is an administrative CLI operation rather than public signup.
+The React UI uses the API through Vite's development proxy; production hosting still needs to serve the UI and API from
+the same origin. `docs/ai-log.md` lists the project decisions.

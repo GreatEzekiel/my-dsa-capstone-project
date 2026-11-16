@@ -12,6 +12,18 @@ function eventFromRow(row) {
     venue: row.venue,
     startsAt: row.starts_at,
     status: row.status,
+    organizerId: row.organizer_id,
+  };
+}
+
+function userFromRow(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    email: row.email,
+    passwordHash: row.password_hash,
+    role: row.role,
+    createdAt: row.created_at,
   };
 }
 
@@ -43,6 +55,7 @@ function bookingFromRow(row) {
     totalCents: row.total_cents,
     status: row.status,
     createdAt: row.created_at,
+    ...(row.expires_at === null ? {} : { expiresAt: row.expires_at }),
     ...(row.cancelled_at === null ? {} : { cancelledAt: row.cancelled_at }),
     history: JSON.parse(row.history_json),
   };
@@ -68,13 +81,13 @@ export function createSqliteRepository(database) {
 
   const statements = Object.freeze({
     insertEvent: database.prepare(`
-      INSERT INTO events (id, title, city, venue, starts_at, status)
-      VALUES (?, ?, ?, ?, ?, ?)
+      INSERT INTO events (id, title, city, venue, starts_at, status, organizer_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
     `),
     getEvent: database.prepare('SELECT * FROM events WHERE id = ?'),
     listEvents: database.prepare('SELECT * FROM events ORDER BY rowid'),
     updateEvent: database.prepare(`
-      UPDATE events SET title = ?, city = ?, venue = ?, starts_at = ?, status = ?
+      UPDATE events SET title = ?, city = ?, venue = ?, starts_at = ?, status = ?, organizer_id = ?
       WHERE id = ?
     `),
     insertTier: database.prepare(`
@@ -107,15 +120,27 @@ export function createSqliteRepository(database) {
       INSERT INTO users (id, created_at) VALUES (?, ?)
       ON CONFLICT(id) DO NOTHING
     `),
+    insertAccount: database.prepare(`
+      INSERT INTO users (id, created_at, email, password_hash, role)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(email) DO NOTHING
+    `),
+    getUserByEmail: database.prepare('SELECT * FROM users WHERE email = ?'),
+    getUserById: database.prepare('SELECT * FROM users WHERE id = ?'),
     insertBooking: database.prepare(`
       INSERT INTO bookings (
         id, reference, event_id, tier_id, user_id, quantity, customer,
-        total_cents, status, created_at, cancelled_at, history_json
+        total_cents, status, created_at, expires_at, cancelled_at, history_json
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `),
     getBookingByReference: database.prepare('SELECT * FROM bookings WHERE reference = ?'),
     listBookings: database.prepare('SELECT * FROM bookings ORDER BY rowid'),
+    listExpiredPendingBookings: database.prepare(`
+      SELECT * FROM bookings
+      WHERE status = 'pending' AND expires_at IS NOT NULL AND expires_at <= ?
+      ORDER BY rowid
+    `),
     listBookingsForEvent: database.prepare('SELECT * FROM bookings WHERE event_id = ? ORDER BY rowid'),
     updateBooking: database.prepare(`
       UPDATE bookings
@@ -147,9 +172,24 @@ export function createSqliteRepository(database) {
   return Object.freeze({
     async createEvent(event) {
       statements.insertEvent.run(
-        event.id, event.title, event.city, event.venue, event.startsAt, event.status,
+        event.id, event.title, event.city, event.venue, event.startsAt, event.status, event.organizerId ?? null,
       );
       return copy(event);
+    },
+
+    async createUser(user) {
+      const result = statements.insertAccount.run(
+        user.id, user.createdAt, user.email, user.passwordHash, user.role,
+      );
+      return result.changes === 1 ? userFromRow(statements.getUserById.get(user.id)) : null;
+    },
+
+    async getUserByEmail(email) {
+      return userFromRow(statements.getUserByEmail.get(email));
+    },
+
+    async getUserById(id) {
+      return userFromRow(statements.getUserById.get(id));
     },
 
     async getEvent(id) {
@@ -162,7 +202,7 @@ export function createSqliteRepository(database) {
 
     async saveEvent(event) {
       statements.updateEvent.run(
-        event.title, event.city, event.venue, event.startsAt, event.status, event.id,
+        event.title, event.city, event.venue, event.startsAt, event.status, event.organizerId ?? null, event.id,
       );
       return eventFromRow(statements.getEvent.get(event.id));
     },
@@ -210,6 +250,7 @@ export function createSqliteRepository(database) {
           booking.totalCents,
           booking.status,
           booking.createdAt,
+          booking.expiresAt ?? null,
           booking.cancelledAt ?? null,
           JSON.stringify(booking.history),
         );
@@ -230,6 +271,10 @@ export function createSqliteRepository(database) {
         ? statements.listBookings.all()
         : statements.listBookingsForEvent.all(eventId);
       return rows.map(bookingFromRow);
+    },
+
+    async listExpiredPendingBookings(before) {
+      return statements.listExpiredPendingBookings.all(before).map(bookingFromRow);
     },
 
     async transitionBooking(reference, expectedStatus, booking) {
@@ -366,6 +411,7 @@ export function createSqliteRepository(database) {
           booking.totalCents,
           booking.status,
           booking.createdAt,
+          booking.expiresAt ?? null,
           booking.cancelledAt ?? null,
           JSON.stringify(booking.history),
         );

@@ -37,6 +37,11 @@ export const HTTP_STATUS_BY_DOMAIN_CODE = Object.freeze({
   INVALID_TRANSITION: 409,
   INVALID_STATE: 409,
   PAYMENT_DECLINED: 402,
+  EMAIL_TAKEN: 409,
+  INVALID_CREDENTIALS: 401,
+  UNAUTHENTICATED: 401,
+  FORBIDDEN: 403,
+  BOOKING_EXPIRED: 409,
 });
 
 // The only thing a client ever learns about a bug.

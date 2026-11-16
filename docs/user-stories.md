@@ -140,10 +140,10 @@ so its data is reset when the server restarts. See [Build 4](build-4.md) and [AP
   **Then** the request is rejected with `INVALID_TRANSITION` and the payment is not charged again.
 - **Given** a booking owned by another caller
   **When** someone attempts payment
-  **Then** the request returns `NOT_FOUND` and the booking remains unchanged.
+  **Then** the request returns `FORBIDDEN` and the booking remains unchanged.
 
-The caller is identified by the `x-user-id` request header until authentication is added in a later build. Build 4
-also limits cancellation to the owner of a pending booking.
+Build 4 originally used a caller-supplied `x-user-id`. Build 7 replaces it with a signed bearer token and enforces
+booking ownership on the server.
 
 ## Build 5: SQLite and the overselling fix
 
@@ -158,6 +158,50 @@ attempts for one remaining ticket. See [Build 5](build-5.md).
 - **Given** the atomic database reservation is removed
   **When** the overselling regression test runs
   **Then** the test fails.
+
+## Build 6: checkout screen
+
+The REST-backed React screen adds the checkout workflow. A pending booking shows its 24-hour hold countdown, a sold-out
+tier cannot be booked directly, and a declined mock payment leaves the booking pending so the attendee can retry.
+See [Build 6](build-6.md).
+
+## Build 7: accounts, roles and privacy
+
+### S01: As a visitor, I want to sign up and log in, so that my bookings are private
+
+- **Given** a new email and a password of at least 8 characters
+  **When** the visitor signs up
+  **Then** an attendee or organizer account is created, only a salted hash is stored, and a signed token is returned.
+- **Given** an email already registered
+  **When** someone signs up again
+  **Then** the request is rejected with `EMAIL_TAKEN`.
+- **Given** correct credentials
+  **When** the user logs in
+  **Then** an expiring bearer token is returned.
+- **Given** a wrong password or unknown email
+  **When** someone logs in
+  **Then** both responses use the same `INVALID_CREDENTIALS` code and message.
+- **Given** a missing, edited, expired, or non-HS256 token
+  **When** a protected request is made
+  **Then** the request is rejected with `UNAUTHENTICATED`.
+
+### S13: As an attendee, I want to see only my own bookings, so that my data is private
+
+- **Given** attendee A has a booking
+  **When** attendee B reads that booking
+  **Then** the request returns `FORBIDDEN`.
+- **Given** an attendee requests their booking list
+  **When** the API responds
+  **Then** only that attendee's bookings are returned.
+- **Given** organizer A owns an event
+  **When** organizer B tries to change it
+  **Then** the request returns `FORBIDDEN`.
+- **Given** an attendee or public signup request for the staff role
+  **When** the request is made
+  **Then** event creation is refused for the attendee and staff signup is refused; staff accounts require trusted provisioning.
+
+The `AUTH_TOKEN_SECRET` environment variable is mandatory at startup. The React UI sends `Authorization: Bearer …`;
+server-side guards enforce roles and ownership. See [Build 7](build-7.md).
 
 ## Stories from earlier work (Build 1 rules, no story number yet)
 

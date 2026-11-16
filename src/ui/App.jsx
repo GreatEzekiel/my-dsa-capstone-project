@@ -1,13 +1,14 @@
 // App.jsx: the React screen. Event and booking operations go through the REST API;
 // this component keeps only transient form and display state.
 
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { formatMoney } from '../domain/money.js';
 import { SORT_OPTIONS } from '../domain/eventSearch.js';
 import { compareText, mergeSort } from '../domain/sorting.js';
 import { BookingState, canTransition } from '../domain/bookingStateMachine.js';
 import { MAX_TICKETS_PER_BOOKING } from '../domain/ticketLimits.js';
-import { getUiUserId, requestJson } from './api.js';
+import { requestJson } from './api.js';
+import { clearSession, getSession, saveSession } from './session.js';
 
 // ---------- small helpers ----------
 
@@ -37,9 +38,15 @@ function searchPath(filters) {
 // ---------- the page ----------
 
 export default function App() {
-  const userIdRef = useRef(null);
-  if (!userIdRef.current) userIdRef.current = getUiUserId();
-  const userId = userIdRef.current;
+  const [session, setSession] = useState(getSession);
+  const user = session?.user ?? null;
+  const [page, setPage] = useState('browse');
+  const [authMode, setAuthMode] = useState('login');
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [authRole, setAuthRole] = useState('attendee');
+  const [authError, setAuthError] = useState('');
+  const [authBusy, setAuthBusy] = useState(false);
   const logId = useRef(0);
   const [log, setLog] = useState([]);
   const [filters, setFilters] = useState({
@@ -63,12 +70,32 @@ export default function App() {
   const [foundTierName, setFoundTierName] = useState('');
   const [lookupError, setLookupError] = useState('');
   const [busy, setBusy] = useState(false);
+  const refreshData = useCallback(() => setRefreshKey((current) => current + 1), []);
 
   const setF = (patch) => setFilters((current) => ({ ...current, ...patch }));
   const cities = mergeSort(
     [...new Set((allEvents.length ? allEvents : results).map((summary) => summary.city))],
     compareText,
   );
+
+  useEffect(() => {
+    if (!session) return undefined;
+    const controller = new AbortController();
+    requestJson('/api/auth/me', { signal: controller.signal })
+      .then(({ user: currentUser }) => {
+        if (currentUser.id !== session.user.id || currentUser.role !== session.user.role) {
+          setSession(saveSession({ ...session, user: currentUser }));
+        }
+      })
+      .catch((error) => {
+        if (error.name === 'AbortError') return;
+        if (error.code === 'UNAUTHENTICATED') {
+          clearSession();
+          setSession(null);
+        }
+      });
+    return () => controller.abort();
+  }, [session?.token]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -113,12 +140,12 @@ export default function App() {
     if (!selectedId) return undefined;
     const controller = new AbortController();
     setEventLoading(true);
+    const waitlistRequest = session
+      ? requestJson(`/api/events/${encodeURIComponent(selectedId)}/waitlists`, { signal: controller.signal })
+      : Promise.resolve({ waitlists: [] });
     Promise.all([
       requestJson(`/api/events/${encodeURIComponent(selectedId)}`, { signal: controller.signal }),
-      requestJson(`/api/events/${encodeURIComponent(selectedId)}/waitlists`, {
-        signal: controller.signal,
-        userId,
-      }),
+      waitlistRequest,
     ])
       .then(([eventResponse, waitlistResponse]) => {
         setEvent(eventResponse.event);
@@ -134,13 +161,18 @@ export default function App() {
         if (!controller.signal.aborted) setEventLoading(false);
       });
     return () => controller.abort();
-  }, [selectedId, userId, refreshKey]);
+  }, [selectedId, session?.token, refreshKey]);
 
   useEffect(() => {
     const reference = lookup.trim();
     if (!reference) {
       setFound(null);
       setLookupError('');
+      return undefined;
+    }
+    if (!session) {
+      setFound(null);
+      setLookupError('Sign in to view your tickets.');
       return undefined;
     }
     const controller = new AbortController();
@@ -160,7 +192,7 @@ export default function App() {
       clearTimeout(timer);
       controller.abort();
     };
-  }, [lookup, refreshKey]);
+  }, [lookup, session?.token, refreshKey]);
 
   useEffect(() => {
     if (!found) {
@@ -201,8 +233,41 @@ export default function App() {
     }
   }
 
+  async function submitAuth(e) {
+    e.preventDefault();
+    setAuthBusy(true);
+    setAuthError('');
+    try {
+      const path = authMode === 'signup' ? '/api/auth/signup' : '/api/auth/login';
+      const body = {
+        email: authEmail,
+        password: authPassword,
+        ...(authMode === 'signup' ? { role: authRole } : {}),
+      };
+      const result = await requestJson(path, { method: 'POST', body });
+      setSession(saveSession(result));
+      setAuthPassword('');
+      setPage('browse');
+    } catch (error) {
+      setAuthError(`${error.code ?? 'ERROR'}: ${error.message}`);
+    } finally {
+      setAuthBusy(false);
+    }
+  }
+
+  function signOut() {
+    clearSession();
+    setSession(null);
+    setPage('browse');
+    setFound(null);
+    setLookup('');
+    setWaitlists({});
+  }
+
   const activeEvent = event?.id === selectedId ? event : null;
   const tier = activeEvent?.tiers.find((item) => item.id === tierId) ?? activeEvent?.tiers[0];
+  const maxQuantity = tier ? Math.min(MAX_TICKETS_PER_BOOKING, tier.seatsLeft || MAX_TICKETS_PER_BOOKING) : 1;
+  useEffect(() => setQuantity((current) => Math.min(current, maxQuantity)), [maxQuantity]);
   const currentWaitlist = tier ? (waitlists[tier.id] ?? []) : [];
   const lineExists = currentWaitlist.length > 0 || (tier?.waitlistSize ?? 0) > 0;
   const waitingCount = Math.max(currentWaitlist.length, tier?.waitlistSize ?? 0);
@@ -217,18 +282,25 @@ export default function App() {
   const submit = (e) => {
     e.preventDefault();
     if (!activeEvent || !tier) return;
+    if (!user) {
+      setAuthError('Sign in as an attendee to book or join a waitlist.');
+      return;
+    }
+    if (user.role !== 'attendee') {
+      setAuthError('Only attendee accounts can book tickets.');
+      return;
+    }
     run(async () => {
       if (needsWaitlist) {
         const result = await requestJson(
           `/api/events/${encodeURIComponent(activeEvent.id)}/tiers/${encodeURIComponent(tier.id)}/waitlist`,
-          { method: 'POST', body: { quantity, customer }, userId },
+          { method: 'POST', body: { quantity, customer } },
         );
         return `${customer.trim()} is number ${result.position} on the ${tier.name} waitlist`;
       }
       const { booking } = await requestJson('/api/bookings', {
         method: 'POST',
         body: { eventId: activeEvent.id, tierId: tier.id, quantity, customer },
-        userId,
       });
       setLookup(booking.reference);
       return `Booked ${booking.quantity} × ${tier.name} for ${booking.customer}`;
@@ -238,7 +310,7 @@ export default function App() {
   const cancel = () => run(async () => {
     const { booking } = await requestJson(
       `/api/bookings/${encodeURIComponent(found.reference)}/cancel`,
-      { method: 'POST', userId },
+      { method: 'POST' },
     );
     const nextInLine = found.eventId === activeEvent?.id && found.tierId === tier?.id
       ? currentWaitlist[0]?.customer
@@ -249,7 +321,7 @@ export default function App() {
   const leave = (targetTier, entry) => run(async () => {
     await requestJson(
       `/api/events/${encodeURIComponent(activeEvent.id)}/tiers/${encodeURIComponent(targetTier.id)}/waitlist/${encodeURIComponent(entry.id)}`,
-      { method: 'DELETE', userId },
+      { method: 'DELETE' },
     );
     return `${entry.customer} left the ${targetTier.name} waitlist`;
   });
@@ -257,15 +329,57 @@ export default function App() {
   const bookNext = (targetTier) => run(async () => {
     const { booking } = await requestJson(
       `/api/events/${encodeURIComponent(activeEvent.id)}/tiers/${encodeURIComponent(targetTier.id)}/waitlist/next/book`,
-      { method: 'POST', userId },
+      { method: 'POST' },
     );
     setLookup(booking.reference);
     return `Booked ${booking.quantity} × ${targetTier.name} for ${booking.customer} from the waitlist`;
   });
 
+  const payBooking = (reference, mockResult = 'success') => run(async () => {
+    const { booking } = await requestJson(
+      `/api/bookings/${encodeURIComponent(reference)}/pay`,
+      { method: 'POST', body: { mockResult } },
+    );
+    return `Payment complete for ${booking.reference}`;
+  });
+
+  const cancelBooking = (reference) => run(async () => {
+    const { booking } = await requestJson(
+      `/api/bookings/${encodeURIComponent(reference)}/cancel`,
+      { method: 'POST' },
+    );
+    return `Cancelled ${booking.reference}`;
+  });
+
+  if (page === 'tickets' && user?.role === 'attendee') {
+    return (
+      <main className="mx-auto max-w-6xl space-y-6 px-4 py-6 sm:px-6 lg:py-10">
+        <AccountBar user={user} page={page} onPage={setPage} onSignOut={signOut} />
+        <TicketsPage onCancel={cancelBooking} onPay={payBooking} onExpire={refreshData} />
+        <Activity log={log} />
+      </main>
+    );
+  }
+
+  if (page === 'organizer' && user?.role === 'organizer') {
+    return (
+      <main className="mx-auto max-w-6xl space-y-6 px-4 py-6 sm:px-6 lg:py-10">
+        <AccountBar user={user} page={page} onPage={setPage} onSignOut={signOut} />
+        <OrganizerDashboard onRun={run} refreshKey={refreshKey} />
+        <Activity log={log} />
+      </main>
+    );
+  }
+
   if (!activeEvent) {
     return (
       <main className="mx-auto max-w-6xl space-y-6 px-4 py-10">
+        <AccountBar user={user} page={page} onPage={setPage} onSignOut={signOut} />
+        <AuthPanel
+          user={user} mode={authMode} setMode={setAuthMode} email={authEmail} setEmail={setAuthEmail}
+          password={authPassword} setPassword={setAuthPassword} role={authRole} setRole={setAuthRole}
+          error={authError} busy={authBusy} onSubmit={submitAuth}
+        />
         <h1 className="text-3xl font-extrabold">Event Ticketing</h1>
         <p role={eventError ? 'alert' : 'status'} className="rounded-xl bg-white p-5">
           {eventError || searchError || (searchLoading || eventLoading
@@ -279,6 +393,13 @@ export default function App() {
 
   return (
     <main className="mx-auto max-w-6xl space-y-8 px-4 py-6 sm:px-6 lg:py-10">
+      <AccountBar user={user} page={page} onPage={setPage} onSignOut={signOut} />
+      <AuthPanel
+        user={user} mode={authMode} setMode={setAuthMode} email={authEmail} setEmail={setAuthEmail}
+        password={authPassword} setPassword={setAuthPassword} role={authRole} setRole={setAuthRole}
+        error={authError} busy={authBusy} onSubmit={submitAuth}
+      />
+      {authError && user && <p role="alert" className="rounded-xl bg-coral/10 p-4 text-coral">{authError}</p>}
       <Browse
         filters={filters} setF={setF} cities={cities} results={results} error={searchError}
         selectedId={activeEvent.id}
@@ -304,6 +425,11 @@ export default function App() {
         <div className="space-y-6 lg:sticky lg:top-6">
           <form onSubmit={submit} className="space-y-5 rounded-3xl bg-white p-6 shadow-sm ring-1 ring-ink/5">
             <h2 className="text-2xl font-extrabold tracking-tight">Get tickets</h2>
+            {user?.role !== 'attendee' && (
+              <p role={user ? 'alert' : 'status'} className="rounded-xl bg-page p-3 text-sm">
+                {user ? 'Sign in with an attendee account to book tickets.' : 'Sign in as an attendee to book tickets or join a waitlist.'}
+              </p>
+            )}
 
             {/* Tier picker: big radio-style buttons instead of a dropdown */}
             <div role="radiogroup" aria-label="Ticket type" className="grid grid-cols-2 gap-3">
@@ -331,7 +457,8 @@ export default function App() {
                   disabled={quantity <= 1} onClick={() => setQuantity(quantity - 1)}>−</button>
                 <span className="num w-6 text-center text-xl font-extrabold" aria-live="polite">{quantity}</span>
                 <button type="button" aria-label="One more ticket" className={`${btnQuiet} size-10 text-lg`}
-                  disabled={quantity >= MAX_TICKETS_PER_BOOKING} onClick={() => setQuantity(quantity + 1)}>+</button>
+                  disabled={quantity >= Math.min(MAX_TICKETS_PER_BOOKING, tier.seatsLeft || MAX_TICKETS_PER_BOOKING)}
+                  onClick={() => setQuantity(quantity + 1)}>+</button>
               </div>
             </div>
 
@@ -360,7 +487,7 @@ export default function App() {
               )}
             </div>
 
-            <button className={btnPrimary} disabled={activeEvent.started || busy}>
+            <button className={btnPrimary} disabled={activeEvent.started || busy || (tier.seatsLeft === 0 && !needsWaitlist)}>
               {busy ? 'Please wait…' : needsWaitlist ? 'Join waitlist' : 'Book tickets'}
             </button>
           </form>
@@ -370,7 +497,14 @@ export default function App() {
             <input className={`${field} font-mono uppercase tracking-widest`} aria-label="Reference code" value={lookup}
               onChange={(e) => setLookup(e.target.value)} placeholder="7K2M-9Q4X" />
             {found ? (
-              <Pass booking={found} tierName={foundTierName || 'Ticket'} onCancel={cancel} />
+              <Pass
+                booking={found}
+                tierName={foundTierName || 'Ticket'}
+                onCancel={() => cancel(found.reference)}
+                onPay={(mockResult) => payBooking(found.reference, mockResult)}
+                onExpire={refreshData}
+                busy={busy}
+              />
             ) : (
               <p role={lookupError ? 'alert' : undefined} className="text-sm text-ink/55">
                 {lookupError || (lookup.trim() ? 'No booking with that code.' : 'Type or paste a reference code to see the ticket.')}
@@ -386,6 +520,198 @@ export default function App() {
 }
 
 // ---------- pieces ----------
+
+function AccountBar({ user, page, onPage, onSignOut }) {
+  return (
+    <header className="flex flex-wrap items-center justify-between gap-4 rounded-2xl bg-white px-5 py-4 shadow-sm ring-1 ring-ink/5">
+      <h1 className="text-xl font-extrabold">Event Ticketing</h1>
+      <nav aria-label="Account" className="flex flex-wrap items-center gap-2">
+        <button className={btnQuiet} aria-current={page === 'browse' ? 'page' : undefined} onClick={() => onPage('browse')}>Browse events</button>
+        {user?.role === 'attendee' && (
+          <button className={btnQuiet} aria-current={page === 'tickets' ? 'page' : undefined} onClick={() => onPage('tickets')}>My tickets</button>
+        )}
+        {user?.role === 'organizer' && (
+          <button className={btnQuiet} aria-current={page === 'organizer' ? 'page' : undefined} onClick={() => onPage('organizer')}>Organizer dashboard</button>
+        )}
+        {user ? (
+          <>
+            <span className="px-2 text-sm text-ink/65">{user.email}</span>
+            <button className={btnQuiet} onClick={onSignOut}>Sign out</button>
+          </>
+        ) : <span className="text-sm text-ink/65">Browsing as a visitor</span>}
+      </nav>
+    </header>
+  );
+}
+
+function AuthPanel({ user, mode, setMode, email, setEmail, password, setPassword, role, setRole, error, busy, onSubmit }) {
+  if (user) return null;
+  return (
+    <section aria-label="Sign in or create an account" className="rounded-3xl bg-white p-6 shadow-sm ring-1 ring-ink/5">
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+        <h2 className="text-xl font-extrabold">{mode === 'signup' ? 'Create an account' : 'Sign in'}</h2>
+        <button className={btnQuiet} type="button" onClick={() => setMode(mode === 'signup' ? 'login' : 'signup')}>
+          {mode === 'signup' ? 'I already have an account' : 'Create an account'}
+        </button>
+      </div>
+      <form onSubmit={onSubmit} className="grid gap-3 sm:grid-cols-2">
+        <label className="block">
+          <span className="mb-1 block text-sm font-semibold">Email</span>
+          <input className={field} type="email" autoComplete="email" required value={email} onChange={(e) => setEmail(e.target.value)} />
+        </label>
+        <label className="block">
+          <span className="mb-1 block text-sm font-semibold">Password (at least 8 characters)</span>
+          <input className={field} type="password" autoComplete={mode === 'signup' ? 'new-password' : 'current-password'}
+            minLength={mode === 'signup' ? 8 : undefined} required value={password} onChange={(e) => setPassword(e.target.value)} />
+        </label>
+        {mode === 'signup' && (
+          <label className="block">
+            <span className="mb-1 block text-sm font-semibold">Account type</span>
+            <select className={field} value={role} onChange={(e) => setRole(e.target.value)}>
+              <option value="attendee">Attendee</option>
+              <option value="organizer">Organizer</option>
+            </select>
+          </label>
+        )}
+        <div className="flex items-end">
+          <button className={btnPrimary} disabled={busy}>{busy ? 'Please wait…' : mode === 'signup' ? 'Create account' : 'Sign in'}</button>
+        </div>
+      </form>
+      {error && <p role="alert" className="mt-3 rounded-xl bg-coral/10 p-3 text-sm text-coral">{error}</p>}
+      <p className="mt-3 text-xs text-ink/55">Staff accounts are provisioned by an administrator. Passwords are never stored in the browser or returned by the API.</p>
+    </section>
+  );
+}
+
+function TicketsPage({ onCancel, onPay, onExpire }) {
+  const [tickets, setTickets] = useState([]);
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setLoading(true);
+    requestJson('/api/bookings', { signal: controller.signal })
+      .then(async ({ bookings }) => {
+        const detailed = await Promise.all(bookings.map(async (booking) => {
+          const { event } = await requestJson(`/api/events/${encodeURIComponent(booking.eventId)}`, { signal: controller.signal });
+          return {
+            ...booking,
+            eventTitle: event.title,
+            tierName: event.tiers.find((tier) => tier.id === booking.tierId)?.name ?? 'Ticket',
+          };
+        }));
+        setTickets(detailed);
+        setError('');
+      })
+      .catch((cause) => {
+        if (cause.name !== 'AbortError') setError(`${cause.code ?? 'ERROR'}: ${cause.message}`);
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoading(false);
+      });
+    return () => controller.abort();
+  }, []);
+
+  return (
+    <section className="space-y-4">
+      <h2 className="text-3xl font-extrabold">My tickets</h2>
+      {loading && <p role="status">Loading your tickets…</p>}
+      {error && <p role="alert" className="rounded-xl bg-coral/10 p-4 text-coral">{error}</p>}
+      {!loading && !error && tickets.length === 0 && <p className="rounded-xl bg-white p-5">You do not have any bookings yet.</p>}
+      <div className="grid gap-4 md:grid-cols-2">
+        {tickets.map((ticket) => (
+          <article key={ticket.reference} className="space-y-2 rounded-2xl bg-white p-4 shadow-sm">
+            <h3 className="font-bold">{ticket.eventTitle}</h3>
+            <Pass booking={ticket} tierName={ticket.tierName} onCancel={() => onCancel(ticket.reference)}
+              onPay={(result) => onPay(ticket.reference, result)} onExpire={onExpire} />
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function OrganizerDashboard({ onRun, refreshKey }) {
+  const [events, setEvents] = useState([]);
+  const [title, setTitle] = useState('');
+  const [city, setCity] = useState('');
+  const [venue, setVenue] = useState('');
+  const [startsAt, setStartsAt] = useState('');
+  const [tierName, setTierName] = useState('General');
+  const [priceNaira, setPriceNaira] = useState('');
+  const [capacity, setCapacity] = useState('');
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    const controller = new AbortController();
+    requestJson('/api/organizer/events', { signal: controller.signal })
+      .then(({ events: owned }) => { setEvents(owned); setError(''); })
+      .catch((cause) => {
+        if (cause.name !== 'AbortError') setError(`${cause.code ?? 'ERROR'}: ${cause.message}`);
+      });
+    return () => controller.abort();
+  }, [refreshKey]);
+
+  async function createEvent(e) {
+    e.preventDefault();
+    setError('');
+    const price = /^\d+(?:\.\d{1,2})?$/.test(priceNaira) ? Number(priceNaira) : NaN;
+    const capacityValue = /^\d+$/.test(capacity) ? Number(capacity) : NaN;
+    if (!Number.isFinite(price) || !Number.isSafeInteger(capacityValue) || capacityValue < 1) {
+      setError('Enter a non-negative price with at most two decimal places and a whole-number capacity.');
+      return;
+    }
+    await onRun(async () => {
+      const { event } = await requestJson('/api/events', {
+        method: 'POST',
+        body: { title, city, venue, startsAt: new Date(startsAt).toISOString() },
+      });
+      await requestJson(`/api/events/${encodeURIComponent(event.id)}/tiers`, {
+        method: 'POST',
+        body: { name: tierName, priceCents: Math.round(price * 100), capacity: capacityValue },
+      });
+      await requestJson(`/api/events/${encodeURIComponent(event.id)}/publish`, { method: 'POST' });
+      return `Published ${event.title}`;
+    }).catch((cause) => setError(`${cause.code ?? 'ERROR'}: ${cause.message}`));
+  }
+
+  async function togglePublish(event) {
+    await onRun(async () => {
+      await requestJson(`/api/events/${encodeURIComponent(event.id)}/${event.status === 'published' ? 'unpublish' : 'publish'}`, {
+        method: 'POST',
+      });
+      return event.status === 'published' ? `Unpublished ${event.title}` : `Published ${event.title}`;
+    }).catch((cause) => setError(`${cause.code ?? 'ERROR'}: ${cause.message}`));
+  }
+
+  return (
+    <section className="space-y-6">
+      <h2 className="text-3xl font-extrabold">Organizer dashboard</h2>
+      <form onSubmit={createEvent} className="grid gap-4 rounded-3xl bg-white p-6 shadow-sm sm:grid-cols-2">
+        <h3 className="text-xl font-bold sm:col-span-2">Create and publish an event</h3>
+        <label><span className="mb-1 block text-sm font-semibold">Event title</span><input className={field} required value={title} onChange={(e) => setTitle(e.target.value)} /></label>
+        <label><span className="mb-1 block text-sm font-semibold">City</span><input className={field} required value={city} onChange={(e) => setCity(e.target.value)} /></label>
+        <label><span className="mb-1 block text-sm font-semibold">Venue</span><input className={field} required value={venue} onChange={(e) => setVenue(e.target.value)} /></label>
+        <label><span className="mb-1 block text-sm font-semibold">Date and time</span><input className={field} type="datetime-local" required value={startsAt} onChange={(e) => setStartsAt(e.target.value)} /></label>
+        <label><span className="mb-1 block text-sm font-semibold">Ticket tier</span><input className={field} required value={tierName} onChange={(e) => setTierName(e.target.value)} /></label>
+        <label><span className="mb-1 block text-sm font-semibold">Price (₦)</span><input className={field} inputMode="decimal" required value={priceNaira} onChange={(e) => setPriceNaira(e.target.value)} /></label>
+        <label><span className="mb-1 block text-sm font-semibold">Capacity</span><input className={field} inputMode="numeric" required value={capacity} onChange={(e) => setCapacity(e.target.value)} /></label>
+        <div className="sm:col-span-2"><button className={btnPrimary}>Create event and publish</button></div>
+      </form>
+      {error && <p role="alert" className="rounded-xl bg-coral/10 p-4 text-coral">{error}</p>}
+      <section aria-label="Your events" className="space-y-3">
+        <h3 className="text-xl font-bold">Your events</h3>
+        {events.length === 0 ? <p className="rounded-xl bg-white p-4">You have not created any events yet.</p> : events.map((event) => (
+          <article key={event.id} className="flex flex-wrap items-center justify-between gap-3 rounded-2xl bg-white p-4 shadow-sm">
+            <div><h4 className="font-bold">{event.title}</h4><p className="text-sm text-ink/60">{event.city} · {event.status} · {event.tiers.length} ticket tier(s)</p></div>
+            <button className={btnQuiet} onClick={() => togglePublish(event)}>{event.status === 'published' ? 'Unpublish' : 'Publish'}</button>
+          </article>
+        ))}
+      </section>
+    </section>
+  );
+}
 
 // The search panel (S05): a form on top, the matching events below. Pressing an event opens it in the main screen.
 function Browse({ filters, setF, cities, results, error, selectedId, onOpen }) {
@@ -575,9 +901,34 @@ function Waitlists({ tiers, queues, onBook, onLeave, busy }) {
 const STATUS_LABEL = { pending: 'Pending', paid: 'Paid', cancelled: 'Cancelled', refunded: 'Refunded', checked_in: 'Checked in' };
 
 // A booking shown as a ticket: name, details, big reference code, barcode and a cancel button.
-function Pass({ booking, tierName, onCancel }) {
+function Pass({ booking, tierName, onCancel, onPay, onExpire, busy = false }) {
   // A booking that was cancelled or refunded no longer holds seats: show it faded, with a stamp.
   const cancelled = booking.status === BookingState.CANCELLED || booking.status === BookingState.REFUNDED;
+  const [secondsLeft, setSecondsLeft] = useState(null);
+  const expirationHandled = useRef(false);
+  useEffect(() => {
+    if (booking.status !== BookingState.PENDING || !booking.expiresAt) {
+      setSecondsLeft(null);
+      return undefined;
+    }
+    expirationHandled.current = false;
+    const update = () => {
+      const remaining = Math.max(0, Date.parse(booking.expiresAt) - Date.now());
+      setSecondsLeft(Math.ceil(remaining / 1000));
+      if (remaining === 0 && !expirationHandled.current) {
+        expirationHandled.current = true;
+        onExpire?.();
+      }
+    };
+    update();
+    const timer = setInterval(update, 1000);
+    return () => clearInterval(timer);
+  }, [booking.expiresAt, booking.status, onExpire]);
+  const countdown = secondsLeft === null ? '' : [
+    Math.floor(secondsLeft / 3600),
+    Math.floor((secondsLeft % 3600) / 60),
+    secondsLeft % 60,
+  ].map((part) => String(part).padStart(2, '0')).join(':');
   return (
     <div className="relative animate-rise overflow-hidden rounded-2xl bg-page">
       <div className={`flex items-center justify-between px-5 py-2.5 text-xs font-bold uppercase tracking-widest text-white ${cancelled ? 'bg-ink/60' : 'bg-cobalt'}`}>
@@ -587,6 +938,7 @@ function Pass({ booking, tierName, onCancel }) {
       <div className={`p-5 ${cancelled ? 'opacity-50' : ''}`}>
         <p className="text-2xl font-extrabold">{booking.customer}</p>
         <p className="num text-sm text-ink/70">{booking.quantity} × {tierName} · {formatMoney(booking.totalCents)}</p>
+        {booking.eventTitle && <p className="text-sm text-ink/70">{booking.eventTitle}</p>}
         {/* The reference code, big and spaced out so it is easy to read aloud */}
         <p className="mt-4 font-mono text-3xl font-bold tracking-[0.18em]">{booking.reference}</p>
         <div aria-hidden className="barcode mt-3 h-10 opacity-80" />
@@ -598,8 +950,19 @@ function Pass({ booking, tierName, onCancel }) {
         </p>
       )}
       <div className="border-t-2 border-dashed border-ink/15 px-5 py-3">
+        {booking.status === BookingState.PENDING && booking.expiresAt && (
+          <p role="status" className="mb-3 text-sm font-semibold">
+            {secondsLeft === 0 ? 'Checkout expired' : `Checkout hold expires in ${countdown}`}
+          </p>
+        )}
+        {booking.status === BookingState.PENDING && onPay && (
+          <div className="mb-3 flex flex-wrap gap-2">
+            <button className={btnPrimary} disabled={busy || secondsLeft === 0} onClick={() => onPay('success')}>Pay with mock card</button>
+            <button className={btnQuiet} disabled={busy || secondsLeft === 0} onClick={() => onPay('declined')}>Simulate declined card</button>
+          </div>
+        )}
         {/* Asks the state machine whether cancelling is allowed from this state (not for cancelled, refunded or checked-in bookings) */}
-        <button className={btnQuiet} disabled={!canTransition(booking.status, BookingState.CANCELLED)} onClick={onCancel}>Cancel booking</button>
+        <button className={btnQuiet} disabled={!canTransition(booking.status, BookingState.CANCELLED) || busy} onClick={onCancel}>Cancel booking</button>
       </div>
     </div>
   );

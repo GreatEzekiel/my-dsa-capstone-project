@@ -9,6 +9,8 @@ export function createMemoryRepository() {
   const tiers = new Map();
   const bookings = new Map();
   const waitlists = new Map();
+  const users = new Map();
+  const userIdsByEmail = new Map();
 
   return Object.freeze({
     async createEvent(event) {
@@ -29,6 +31,24 @@ export function createMemoryRepository() {
       if (!events.has(event.id)) return null;
       events.set(event.id, copy(event));
       return copy(event);
+    },
+
+    async createUser(user) {
+      const emailKey = user.email.toLowerCase();
+      if (userIdsByEmail.has(emailKey)) return null;
+      const saved = copy(user);
+      users.set(saved.id, saved);
+      userIdsByEmail.set(emailKey, saved.id);
+      return copy(saved);
+    },
+
+    async getUserByEmail(email) {
+      const id = userIdsByEmail.get(email.toLowerCase());
+      return copy(id ? users.get(id) : null);
+    },
+
+    async getUserById(id) {
+      return copy(users.get(id) ?? null);
     },
 
     async createTier(tier) {
@@ -70,6 +90,12 @@ export function createMemoryRepository() {
     async listBookings({ eventId } = {}) {
       const all = [...bookings.values()];
       return all.filter((booking) => eventId === undefined || booking.eventId === eventId).map(copy);
+    },
+
+    async listExpiredPendingBookings(before) {
+      return [...bookings.values()]
+        .filter((booking) => booking.status === 'pending' && booking.expiresAt && booking.expiresAt <= before)
+        .map(copy);
     },
 
     async transitionBooking(reference, expectedStatus, booking) {

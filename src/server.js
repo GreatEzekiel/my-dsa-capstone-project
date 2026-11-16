@@ -33,7 +33,12 @@ try {
   process.exit(1);
 }
 const repository = createSqliteRepository(database);
-const services = createServices({ repository, paymentGateway: createMockPaymentGateway() });
+const services = createServices({
+  repository,
+  paymentGateway: createMockPaymentGateway(),
+  tokenSecret: config.tokenSecret,
+  bookingHoldMs: config.bookingHoldMs,
+});
 if (config.demo && (await repository.listEvents()).length === 0) {
   await seedDemoData(services.events);
 }

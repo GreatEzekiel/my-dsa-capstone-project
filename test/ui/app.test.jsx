@@ -33,6 +33,10 @@ function createApiFetch() {
   ];
   const waitlists = new Map();
   const bookings = new Map();
+  const accounts = new Map();
+  const tokens = new Map([['test-token', {
+    id: 'test-user', email: 'attendee@example.test', role: 'attendee',
+  }]]);
   let bookingNumber = 0;
   const publicBooking = (booking) => {
     const { userId, ...visible } = booking;
@@ -63,9 +67,65 @@ function createApiFetch() {
     const url = new URL(input, 'http://ticketing.test');
     const method = options.method ?? 'GET';
     const headers = new Headers(options.headers);
-    const userId = headers.get('x-user-id');
+    const token = headers.get('authorization')?.replace(/^Bearer\s+/i, '');
+    const account = tokens.get(token);
+    const userId = account?.id;
     const body = options.body ? JSON.parse(options.body) : undefined;
     const parts = url.pathname.split('/').filter(Boolean).map(decodeURIComponent);
+
+    if (method === 'POST' && url.pathname === '/api/auth/signup') {
+      if (accounts.has(body.email.toLowerCase())) return error(409, 'EMAIL_TAKEN', 'An account with this email already exists');
+      if (!['attendee', 'organizer'].includes(body.role ?? 'attendee')) return error(400, 'VALIDATION', 'role: must be attendee or organizer');
+      const user = { id: `user-${accounts.size + 1}`, email: body.email.toLowerCase(), role: body.role ?? 'attendee' };
+      const accessToken = `token-${user.id}`;
+      accounts.set(user.email, { user, password: body.password });
+      tokens.set(accessToken, user);
+      return reply(201, { token: accessToken, user });
+    }
+
+    if (method === 'POST' && url.pathname === '/api/auth/login') {
+      const saved = accounts.get(body.email.toLowerCase());
+      if (!saved || saved.password !== body.password) return error(401, 'INVALID_CREDENTIALS', 'Email or password is incorrect');
+      const accessToken = `token-${saved.user.id}`;
+      tokens.set(accessToken, saved.user);
+      return reply(200, { token: accessToken, user: saved.user });
+    }
+
+    if (method === 'GET' && url.pathname === '/api/auth/me') {
+      return account ? reply(200, { user: account }) : error(401, 'UNAUTHENTICATED', 'A valid bearer token is required');
+    }
+
+    if (method === 'GET' && url.pathname === '/api/organizer/events') {
+      if (account?.role !== 'organizer') return error(403, 'FORBIDDEN', 'Organizer role required');
+      return reply(200, { events: events.filter((event) => event.organizerId === userId) });
+    }
+
+    if (method === 'POST' && url.pathname === '/api/events') {
+      if (account?.role !== 'organizer') return error(account ? 403 : 401, account ? 'FORBIDDEN' : 'UNAUTHENTICATED', 'Organizer role required');
+      const event = {
+        id: `event-created-${events.length}`, ...body, status: 'draft', organizerId: userId, tiers: [],
+      };
+      events.push(event);
+      return reply(201, { event });
+    }
+
+    if (method === 'POST' && parts[0] === 'api' && parts[1] === 'events' && parts.length === 4 && parts[3] === 'tiers') {
+      const event = events.find((item) => item.id === parts[2]);
+      if (!event || event.organizerId !== userId) return error(403, 'FORBIDDEN', 'You can only change your own events');
+      const tier = {
+        id: `tier-created-${event.tiers.length}`, eventId: event.id, ...body, sold: 0,
+      };
+      event.tiers.push(tier);
+      return reply(201, { tier });
+    }
+
+    if (method === 'POST' && parts[0] === 'api' && parts[1] === 'events' && parts.length === 4
+      && ['publish', 'unpublish'].includes(parts[3])) {
+      const event = events.find((item) => item.id === parts[2]);
+      if (!event || event.organizerId !== userId) return error(403, 'FORBIDDEN', 'You can only change your own events');
+      event.status = parts[3] === 'publish' ? 'published' : 'draft';
+      return reply(200, { event });
+    }
 
     if (method === 'GET' && url.pathname === '/api/events') {
       const max = url.searchParams.get('maxPriceCents');
@@ -100,7 +160,7 @@ function createApiFetch() {
       if (!event) return error(404, 'NOT_FOUND', 'Event not found');
       return reply(200, { waitlists: event.tiers.map((tier) => ({
         tierId: tier.id,
-        entries: (waitlists.get(tier.id) ?? []).map((entry, index) => ({
+        entries: (waitlists.get(tier.id) ?? []).filter((entry) => account?.role === 'organizer' || entry.userId === userId).map((entry, index) => ({
           ...entry,
           userId: undefined,
           position: index + 1,
@@ -127,6 +187,7 @@ function createApiFetch() {
         totalCents: tier.priceCents * body.quantity,
         status: 'pending',
         createdAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
         history: [{ status: 'pending', at: new Date().toISOString() }],
       };
       bookings.set(created.reference, created);
@@ -188,10 +249,26 @@ function createApiFetch() {
       }
     }
 
+    if (method === 'GET' && url.pathname === '/api/bookings') {
+      if (!account) return error(401, 'UNAUTHENTICATED', 'A valid bearer token is required');
+      return reply(200, { bookings: [...bookings.values()].filter((booking) => booking.userId === userId).map(publicBooking) });
+    }
+
     if (parts[0] === 'api' && parts[1] === 'bookings' && parts.length >= 3) {
       const booking = bookings.get(parts[2]);
       if (!booking) return error(404, 'NOT_FOUND', 'Booking not found');
-      if (method === 'GET' && parts.length === 3) return reply(200, { booking: publicBooking(booking) });
+      if (method === 'GET' && parts.length === 3) {
+        if (booking.userId !== userId) return error(403, 'FORBIDDEN', 'You can only access your own bookings');
+        return reply(200, { booking: publicBooking(booking) });
+      }
+      if (method === 'POST' && parts[3] === 'pay') {
+        if (booking.userId !== userId) return error(403, 'FORBIDDEN', 'You can only access your own bookings');
+        if (body?.mockResult === 'declined') return error(402, 'PAYMENT_DECLINED', 'The mock payment was declined. The booking is still pending');
+        if (booking.status !== 'pending') return error(409, 'INVALID_TRANSITION', 'The booking cannot be paid');
+        booking.status = 'paid';
+        booking.history.push({ status: 'paid', at: new Date().toISOString() });
+        return reply(200, { booking: publicBooking(booking) });
+      }
       if (method === 'POST' && parts[3] === 'cancel') {
         if (booking.userId !== userId) return error(404, 'NOT_FOUND', 'Booking not found');
         if (booking.status !== 'pending') return error(409, 'INVALID_TRANSITION', 'Only pending bookings can be cancelled');
@@ -208,6 +285,10 @@ function createApiFetch() {
 
 beforeEach(async () => {
   localStorage.clear();
+  localStorage.setItem('event-ticketing-session', JSON.stringify({
+    token: 'test-token',
+    user: { id: 'test-user', email: 'attendee@example.test', role: 'attendee' },
+  }));
   vi.stubGlobal('fetch', createApiFetch());
 });
 
@@ -254,13 +335,13 @@ describe('Event ticketing screen', () => {
     expect(screen.getByRole('button', { name: 'Book tickets' })).toBeTruthy();
   });
 
-  test('the quantity stepper stays between 1 and 10', async () => {
+  test('the quantity stepper cannot exceed the seats left or the booking limit', async () => {
     const user = userEvent.setup();
     await openApp();
     expect(screen.getByRole('button', { name: 'One fewer ticket' }).disabled).toBe(true); // already at 1
     await step(user, 'One more ticket', 12); // try to go past the limit
     expect(screen.getByRole('button', { name: 'One more ticket' }).disabled).toBe(true);
-    expect(screen.getByText('10', { selector: 'span.num' })).toBeTruthy();
+    expect(screen.getByText('6', { selector: 'span.num' })).toBeTruthy();
   });
 
   test('booking shows a message, a reference code and the ticket', async () => {
@@ -272,6 +353,20 @@ describe('Event ticketing screen', () => {
     // The lookup box was filled with the new booking's code, e.g. "7K2M-9Q4X"
     expect(screen.getByLabelText('Reference code').value).toMatch(/^[0-9A-Z]{4}-[0-9A-Z]{4}$/);
     expect(await screen.findByRole('button', { name: 'Cancel booking' })).toBeTruthy();
+  });
+
+  test('checkout counts down and a declined mock card can be retried', async () => {
+    const user = userEvent.setup();
+    await openApp();
+    await typeName(user, 'Ada');
+    await press(user, 'Book tickets');
+    expect(await screen.findByText(/Checkout hold expires in/)).toBeTruthy();
+
+    await press(user, 'Simulate declined card');
+    expect(await screen.findByText(/PAYMENT_DECLINED/)).toBeTruthy();
+    expect(screen.getByText('Pending')).toBeTruthy();
+    await press(user, 'Pay with mock card');
+    expect(await screen.findByText('Paid')).toBeTruthy();
   });
 
   test('a blank name is refused with a readable VALIDATION message', async () => {
@@ -337,6 +432,22 @@ describe('Find an event (S05)', () => {
     expect(listed()).toEqual(['Abuja Jazz Night', 'Port Harcourt Comedy Live', 'Lagos Night of Tech', 'Lagos Food Festival']);
     expect(screen.queryByRole('button', { name: /Ibadan Book Fair/ })).toBeNull(); // a draft: private
     expect(screen.getByText('4 events')).toBeTruthy();
+  });
+
+  describe('Build 7 account screens', () => {
+    test('an organizer can sign up and open the organizer dashboard', async () => {
+      localStorage.clear();
+      const user = userEvent.setup();
+      render(<App />);
+      await press(user, 'Create an account');
+      await user.type(screen.getByLabelText('Email'), 'organizer@example.test');
+      await user.type(screen.getByLabelText('Password (at least 8 characters)'), 'long-enough-password');
+      await user.selectOptions(screen.getByLabelText('Account type'), 'organizer');
+      await press(user, 'Create account');
+      await user.click(await screen.findByRole('button', { name: 'Organizer dashboard' }));
+      expect(await screen.findByRole('heading', { name: 'Organizer dashboard' })).toBeTruthy();
+      expect(screen.getByRole('heading', { name: 'Create and publish an event' })).toBeTruthy();
+    });
   });
 
   test('searching "JAZZ" leaves only Abuja Jazz Night', async () => {

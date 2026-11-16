@@ -2,7 +2,10 @@ PRAGMA foreign_keys = ON;
 
 CREATE TABLE IF NOT EXISTS users (
   id TEXT PRIMARY KEY NOT NULL,
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  email TEXT,
+  password_hash TEXT,
+  role TEXT CHECK (role IS NULL OR role IN ('attendee', 'organizer', 'staff'))
 ) STRICT;
 
 CREATE TABLE IF NOT EXISTS events (
@@ -11,7 +14,8 @@ CREATE TABLE IF NOT EXISTS events (
   city TEXT NOT NULL CHECK (length(trim(city)) > 0),
   venue TEXT NOT NULL CHECK (length(trim(venue)) > 0),
   starts_at TEXT NOT NULL,
-  status TEXT NOT NULL CHECK (status IN ('draft', 'published'))
+  status TEXT NOT NULL CHECK (status IN ('draft', 'published')),
+  organizer_id TEXT REFERENCES users(id) ON DELETE SET NULL
 ) STRICT;
 
 CREATE TABLE IF NOT EXISTS ticket_tiers (
@@ -34,6 +38,7 @@ CREATE TABLE IF NOT EXISTS bookings (
   total_cents INTEGER NOT NULL CHECK (total_cents >= 0),
   status TEXT NOT NULL CHECK (status IN ('pending', 'paid', 'cancelled', 'refunded', 'checked_in')),
   created_at TEXT NOT NULL,
+  expires_at TEXT,
   cancelled_at TEXT,
   history_json TEXT NOT NULL
 ) STRICT;

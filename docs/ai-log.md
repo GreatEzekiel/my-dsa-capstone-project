@@ -367,7 +367,31 @@ Refund and check-in endpoints, authentication, persistence, waitlist routes and 
 - **React scope:** the existing React UI continues to use its local domain store. Build 5 changes the REST API persistence and intentionally does not rewire the UI to the API.
 - **Runtime verification:** validation ran with Node 24.22.0, which provides `node:sqlite`; Node 22.13 compatibility was not separately exercised in this environment.
 
-## Not built yet
+## Not built at the end of Build 5 (superseded by Builds 6–7)
 
-The UI is not wired to the persistent API; authentication, waitlist endpoints, paging, rate limiting, CORS, refunds and
-check-in endpoints also remain later work.
+At the end of Build 5, the UI was not wired to the persistent API and authentication remained later work. Builds 6–7
+below address the UI and authentication. Paging, rate limiting, CORS, refunds and check-in endpoints remain later work.
+
+## Builds 6–7: connected React UI and authentication
+
+### Problems found and fixed
+
+| Area | What was incomplete or unsafe | Fix |
+|------|-------------------------------|-----|
+| React API client | The screen used a local/demo identity rather than a verified user identity. | The API client now attaches the session's bearer token; the server authenticates every protected request. |
+| Passwords and tokens | Signup, login and token verification were missing. | Added salted scrypt hashes and expiring HS256 tokens; passwords and hashes are excluded from API responses. |
+| Ownership and roles | Booking and event ownership were not enforced by the server. | Added role and ownership guards for bookings, organizer events, waitlists and staff-only demo transitions. |
+| Existing database files | Older SQLite files lacked account, organizer and hold-expiry columns. | The database initializer adds the required columns and indexes when opening an existing database. |
+| Build 6 brief | Its original prompt requested a second vanilla-JavaScript mock-data client. | Kept the agreed React + REST architecture and built the checkout, countdown and retry behavior on the real API instead. |
+
+### Decisions and verification
+
+- Public signup creates attendees and organizers. Staff accounts require trusted CLI provisioning; public clients cannot
+  assign themselves the staff role.
+- A pending booking is held for 24 hours. Expiration is processed on booking-related requests; there is no background
+  timer or scheduler.
+- A second attendee reading another attendee's booking receives `403 FORBIDDEN`; server guards enforce this even when
+  requests bypass the React UI.
+- `AUTH_TOKEN_SECRET` must be at least 32 bytes and remain stable across restarts. The browser stores only the signed
+  session in local storage and sends it as a bearer token.
+- Full verification: `npm test` passed 466 Node tests and 17 UI tests; `npm run build` passed.

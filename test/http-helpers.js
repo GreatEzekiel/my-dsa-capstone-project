@@ -17,6 +17,7 @@ import { createServices } from '../src/services/index.js';
 
 // The project's real public/ folder.
 export const PUBLIC_DIR = fileURLToPath(new URL('../public', import.meta.url));
+export const TEST_TOKEN_SECRET = 'test-token-secret-for-integration-tests-only';
 
 /**
  * Starts the app on any free port. Returns { app, repository, port, url, logs, close }.
@@ -31,6 +32,7 @@ export async function startApp({
   onlyExtra = false,
   devRoutes = false,
   now,
+  authNow,
   paymentGateway = createMockPaymentGateway(),
   repository: suppliedRepository,
   database: suppliedDatabase,
@@ -39,7 +41,13 @@ export async function startApp({
   const logs = { info: [], error: [] };
   const database = suppliedDatabase ?? createDatabase(databasePath);
   const repository = suppliedRepository ?? createSqliteRepository(database);
-  const services = createServices({ repository, paymentGateway, now });
+  const services = createServices({
+    repository,
+    paymentGateway,
+    now,
+    authNow,
+    tokenSecret: TEST_TOKEN_SECRET,
+  });
   const app = createApp({
     services,
     publicDir,
@@ -49,6 +57,10 @@ export async function startApp({
     routes: (router, services, options) => {
       if (!onlyExtra) registerRoutes(router, services, options); // the real routes...
       extraRoutes?.(router, services); // ...plus this test's own
+      router.post('/__test/auth/staff', async ({ body }) => {
+        await services.auth.provisionStaff(body);
+        return { status: 201, body: await services.auth.login(body) };
+      });
     },
   });
   const { port, url } = await app.listen(0);
@@ -152,10 +164,60 @@ export async function makeSite() {
 
 /** A tiny client: api.get(path), api.post(path, body). Resolves with { status, headers, text, body } (body = parsed JSON). */
 export function apiClient(baseUrl) {
+  const tokens = new Map();
+
+  function roleFor(method, path) {
+    if (path === '/api/auth/signup' || path === '/api/auth/login' || path === '/health'
+      || (method === 'GET' && (/^\/api\/events(?:\/[^/]+)?$/.test(path)))) {
+      return null;
+    }
+    if (path.startsWith('/api/dev/')) return 'staff';
+    if (method === 'GET' && path === '/api/organizer/events') return 'organizer';
+    if (method === 'GET' && /^\/api\/events\/[^/]+\/waitlists$/.test(path)) return 'organizer';
+    if (method === 'POST' && /^\/api\/events(?:\/[^/]+\/(?:tiers|publish|unpublish))?$/.test(path)) {
+      return 'organizer';
+    }
+    return 'attendee';
+  }
+
+  async function tokenFor(userId, role) {
+    const key = `${role}:${userId}`;
+    if (tokens.has(key)) return tokens.get(key);
+    const pending = (async () => {
+      const password = 'test-password-for-http';
+      const email = `test-${Buffer.from(userId).toString('base64url')}-${role}@example.test`;
+      const response = await fetch(`${baseUrl}${role === 'staff' ? '/__test/auth/staff' : '/api/auth/signup'}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password, ...(role === 'staff' ? {} : { role }) }),
+      });
+      if (!response.ok) {
+        throw new Error(`Could not create test ${role} account: ${response.status} ${await response.text()}`);
+      }
+      return (await response.json()).token;
+    })();
+    tokens.set(key, pending);
+    try {
+      const token = await pending;
+      tokens.set(key, token);
+      return token;
+    } catch (error) {
+      tokens.delete(key);
+      throw error;
+    }
+  }
+
   async function call(method, path, body, headers = {}) {
+    const requestHeaders = { ...headers };
+    const userId = requestHeaders['x-user-id'] ?? 'test-user';
+    delete requestHeaders['x-user-id'];
+    const role = roleFor(method, path);
+    if (role && !Object.keys(requestHeaders).some((key) => key.toLowerCase() === 'authorization')) {
+      requestHeaders.Authorization = `Bearer ${await tokenFor(userId, role)}`;
+    }
     const response = await fetch(`${baseUrl}${path}`, {
       method,
-      headers: { 'x-user-id': 'test-user', ...(body === undefined ? {} : { 'Content-Type': 'application/json' }), ...headers },
+      headers: { ...(body === undefined ? {} : { 'Content-Type': 'application/json' }), ...requestHeaders },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
     const text = await response.text();

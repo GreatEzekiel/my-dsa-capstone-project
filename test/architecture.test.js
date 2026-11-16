@@ -78,12 +78,17 @@ test('DATA (inventory, repositories and database connection) imports only data, 
   }
 });
 
-test('SERVICES import only services and rules: data and payment implementations are injected', () => {
+test('SERVICES import services and rules; auth may use the isolated crypto primitives', () => {
   for (const file of files.filter((f) => layerOf(f) === 'services')) {
     for (const specifier of importsOf(file)) {
       const target = resolveImport(file, specifier);
       if (target.external) assert.ok(target.external.startsWith('node:'), `${file} imports the package "${specifier}"`);
-      else assert.ok(['services', 'rules'].includes(layerOf(target.internal)), `${file} (services) imports ${target.internal}: dependencies must be injected`);
+      else {
+        const injectedServices = ['services', 'rules'].includes(layerOf(target.internal));
+        const isolatedAuthPrimitive = file === 'services/authService.js'
+          && ['lib/password.js', 'lib/token.js'].includes(target.internal);
+        assert.ok(injectedServices || isolatedAuthPrimitive, `${file} (services) imports ${target.internal}: dependencies must be injected`);
+      }
     }
   }
 });

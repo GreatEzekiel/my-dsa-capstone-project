@@ -64,6 +64,11 @@ const TRIGGERS = {
     const event = createEvent(store, { title: 'E', city: 'Lagos', venue: 'V', startsAt: inDays(5) });
     return () => publishEvent(store, event.id); // no tiers yet
   },
+  EMAIL_TAKEN: () => () => { throw new DomainError(ErrorCode.EMAIL_TAKEN, 'duplicate email'); },
+  INVALID_CREDENTIALS: () => () => { throw new DomainError(ErrorCode.INVALID_CREDENTIALS, 'invalid credentials'); },
+  UNAUTHENTICATED: () => () => { throw new DomainError(ErrorCode.UNAUTHENTICATED, 'missing token'); },
+  FORBIDDEN: () => () => { throw new DomainError(ErrorCode.FORBIDDEN, 'wrong role'); },
+  BOOKING_EXPIRED: () => () => { throw new DomainError(ErrorCode.BOOKING_EXPIRED, 'expired'); },
 };
 
 for (const [expected, arrange] of Object.entries(TRIGGERS)) {
@@ -109,5 +114,5 @@ test('PAYMENT_DECLINED is triggered by the booking service and leaves the bookin
     bookings.pay(booking.reference, 'attendee-1', { mockResult: 'declined' }),
     { code: 'PAYMENT_DECLINED' },
   );
-  assert.equal((await bookings.get(booking.reference)).status, 'pending');
+  assert.equal((await bookings.get(booking.reference, 'attendee-1')).status, 'pending');
 });

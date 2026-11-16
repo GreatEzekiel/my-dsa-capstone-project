@@ -12,6 +12,7 @@ import { DEFAULT_DATABASE_PATH } from './db/connection.js';
 
 export const DEFAULT_PORT = 3000;
 export const DEFAULT_HOST = '127.0.0.1';
+export const DEFAULT_BOOKING_HOLD_MS = 24 * 60 * 60 * 1000;
 
 // A configuration mistake is a different kind of error from a bad request: it stops the server from starting.
 export class ConfigError extends Error {
@@ -39,11 +40,17 @@ function readDemo(value, argv) {
 
 /** loadConfig(env, argv) -> a frozen settings object. Pass a fake `env` and `argv` in tests. */
 export function loadConfig(env = process.env, argv = process.argv.slice(2)) {
+  const tokenSecret = env.AUTH_TOKEN_SECRET?.trim();
+  if (!tokenSecret || Buffer.byteLength(tokenSecret) < 32) {
+    throw new ConfigError('AUTH_TOKEN_SECRET must be set and contain at least 32 bytes');
+  }
   return Object.freeze({
     port: readPort(env.PORT),
     host: env.HOST?.trim() || DEFAULT_HOST,
     demo: readDemo(env.DEMO, argv),
     databasePath: env.DATABASE_PATH?.trim() || DEFAULT_DATABASE_PATH,
+    tokenSecret,
+    bookingHoldMs: DEFAULT_BOOKING_HOLD_MS,
     // The folder next to src/: the project's public/ folder, wherever the project is on disk.
     publicDir: fileURLToPath(new URL('../public', import.meta.url)),
     maxBodyBytes: 1_000_000,

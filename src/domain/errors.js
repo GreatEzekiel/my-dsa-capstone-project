@@ -16,6 +16,11 @@ export const ErrorCode = Object.freeze({
   INVALID_TRANSITION: 'INVALID_TRANSITION', // a booking was asked to make a move the life cycle does not allow (paying a cancelled booking)
   INVALID_STATE: 'INVALID_STATE', // the action is not allowed in the current state (publishing with no tiers, booking a draft)
   PAYMENT_DECLINED: 'PAYMENT_DECLINED', // the mock payment provider declined; the pending booking is unchanged
+  EMAIL_TAKEN: 'EMAIL_TAKEN',
+  INVALID_CREDENTIALS: 'INVALID_CREDENTIALS',
+  UNAUTHENTICATED: 'UNAUTHENTICATED',
+  FORBIDDEN: 'FORBIDDEN',
+  BOOKING_EXPIRED: 'BOOKING_EXPIRED',
 });
 
 // `extends Error` keeps everything a normal error has: message, stack trace,

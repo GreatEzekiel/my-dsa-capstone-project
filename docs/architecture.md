@@ -25,6 +25,7 @@ flowchart TD
     end
 
     subgraph services["2. Services  ·  src/services"]
+        authSvc["authService"]
         eventSvc["eventService"]
         bookingSvc["bookingService"]
         waitlistSvc["waitlistService"]
@@ -43,8 +44,9 @@ flowchart TD
         schema["db/schema.sql<br/>constraints"]
     end
 
-    subgraph infrastructure["Payment adapter  ·  src/lib"]
+    subgraph infrastructure["Adapters  ·  src/lib"]
         gateway["mockPaymentGateway"]
+        credentials["password.js and token.js<br/>scrypt and HS256"]
     end
     composition["server.js<br/>composition root"]
 
@@ -55,14 +57,16 @@ flowchart TD
     data -->|"checks booking moves"| rules
     repo --> schema
     services -->|"calls injected payment interface"| gateway
+    authSvc -->|"hashes passwords and signs tokens"| credentials
     composition -.->|"injects"| repo
     composition -.->|"injects"| gateway
+    composition -.->|"injects token secret"| authSvc
 ```
 
 **What each layer may and may not do** (one sentence each):
 
 - **Routes** (`src/http`) may read the request (method, path, `:params`, JSON body), call one service function and turn its result or its error into a JSON response, but may not contain business rules, touch the data, or import the rules directly.
-- **Services** (`src/services`) may combine rules and injected repository/payment interfaces into one use case ("pay a booking") and decide the order of the steps, but may not know about HTTP (no request, no response, no status codes) or import a concrete repository or gateway.
+- **Services** (`src/services`) may combine rules and injected repository/payment interfaces into one use case ("pay a booking") and decide the order of the steps, but may not know about HTTP (no request, no response, no status codes) or import a concrete repository or payment gateway; `authService` may use isolated Node-crypto helpers.
 - **Rules** (`src/domain`, the pure files) may only decide things from the values they are given (is this move allowed? does this event match?) and throw a `DomainError`, but may not read or write data, touch the network, files or the clock, or call any other layer.
 - **Data** (`src/repositories` and `src/db`) may store and fetch records and keep them consistent (including atomically reserving seats within capacity), but may not know about HTTP or services, and repositories must consult the rules before changing a booking's status.
 
@@ -70,26 +74,28 @@ flowchart TD
 
 | A file in... | may import from |
 |--------------|-----------------|
-| `src/http` (routes) | `src/http`, `src/services`, and **only** `domain/errors.js` (to recognise errors) |
-| `src/services` | `src/services`, `src/domain`; repositories and payment gateways are injected |
+| `src/http` (routes) | `src/http`, `src/services`, and `domain/errors.js` (guards translate authentication errors) |
+| `src/services` | `src/services`, `src/domain`; repositories and payment gateways are injected; `authService` also imports `src/lib/password.js` and `src/lib/token.js` |
 | `src/domain` (rules) | other rule files, never `inventory.js`, never `services` or `http` |
 | `src/repositories` (data) | `src/domain` rule files |
 | `src/db` (SQLite setup/schema) | Node built-ins only |
 | `src/server.js` (composition root) | config, HTTP, repository, database, service and adapter construction |
-| `src/lib` (payment adapter) | Node built-ins only; it receives no card number |
+| `src/lib` (adapters) | Node built-ins only; the payment adapter receives no card number |
 | `src/ui` (React) | `src/ui` and presentation-only `src/domain` helpers; reads and writes go through the REST API |
 
 **Where things are today.** The pure rules are separate files: `bookingStateMachine.js`, `eventSearch.js`,
 `sorting.js`, `dates.js`, `money.js`, `ids.js`, `waitlistQueue.js`. The API uses the asynchronous
 `repositories/sqlite.js` for persistent API data; `repositories/memory.js` remains available to service tests. The
 terminal demos use `domain/inventory.js`; the React screen no longer uses that in-memory store. The services folder
-holds `eventService`, `bookingService`, `waitlistService` and `healthService`.
+holds `authService`, `eventService`, `bookingService`, `waitlistService` and `healthService`.
 The booking service receives the mock gateway through dependency injection; the gateway never sees card data.
+Authentication uses `node:crypto` scrypt and HS256 helpers with a required environment secret.
 
-**The React screen** (`src/ui`) is a REST client. It loads events, event details, waitlists and bookings with `fetch`,
-and sends search, booking, cancellation and waitlist actions to the server. `src/ui/api.js` adds the demo `x-user-id`,
-parses standard JSON errors and reports network failures. Vite proxies `/api` and `/health` to port 3000 in development
-and preview; the production UI uses same-origin routes. SQLite is the source of truth across browser sessions and server restarts.
+**The React screen** (`src/ui`) is a REST client. It loads events, event details, waitlists and the signed-in attendee's
+bookings with `fetch`, and sends search, booking, payment, cancellation and waitlist actions to the server.
+`src/ui/api.js` adds the session's bearer token, parses standard JSON errors and reports network failures. Vite proxies
+`/api` and `/health` to port 3000 in development and preview; the production UI uses same-origin routes. SQLite is the
+source of truth across browser sessions and server restarts.
 
 **The journey of `GET /health`:** the client sends the request, `app.js` finds the route in the router, the route handler calls
 `services.health.check()`, the service returns `{ status: 'ok' }`, and `app.js` writes it as JSON. If anything throws,
@@ -110,9 +116,9 @@ erDiagram
     USER {
         string id PK
         string createdAt "ISO 8601"
-        string name "not stored yet"
-        string email "not stored yet"
-        string role "not stored yet"
+        string email UK
+        string passwordHash "scrypt only"
+        string role "attendee, organizer, staff"
     }
     EVENT {
         string id PK
@@ -121,7 +127,7 @@ erDiagram
         string venue
         string startsAt "ISO 8601 date and time"
         string status "draft or published"
-        string organizerId "not stored yet"
+        string organizerId FK
     }
     TICKET_TIER {
         string id PK
@@ -136,19 +142,20 @@ erDiagram
         string reference UK "short readable code like 7K2M-9Q4X"
         string eventId FK
         string tierId FK
-        string userId FK "created from x-user-id; not authentication"
+        string userId FK "booking owner"
         string customer "name on the booking"
         int quantity "1 to 10"
         int totalCents "price times quantity"
         string status "the life cycle in section 3"
         string createdAt "ISO 8601"
+        string expiresAt "24-hour pending hold"
         string history "every status the booking has had"
     }
     WAITLIST_ENTRY {
         string id PK
         string eventId FK
         string tierId FK
-        string userId FK "created from x-user-id; not authentication"
+        string userId FK "queue owner"
         string customer
         int quantity
         string customerKey "normalized; unique per tier"
@@ -158,7 +165,7 @@ erDiagram
 
 Notes:
 
-- **`USER` is now stored minimally.** SQLite creates a user row (id and creation time) when a booking is made so the booking's foreign key is valid. `x-user-id` remains caller-supplied and is not authentication; names, email addresses, roles and organizer ownership are not implemented.
+- **`USER` stores account credentials safely.** Email, role and a salted scrypt hash are persisted; plaintext passwords and hashes are never returned. User IDs come from verified signed tokens, not request headers.
 - **Money is whole cents** (kobo): `500000` is ₦5,000.00. Never decimals.
 - **`sold` follows the bookings:** it counts the seats of every booking in a state that holds seats (`pending`, `paid`, `checked_in`). `cancelled` and `refunded` give them back.
 - **A tier belongs to exactly one event**, and a booking is for exactly one tier (1 to 10 tickets).
@@ -166,7 +173,8 @@ Notes:
 - **Dates are ISO 8601 strings.** A time with no zone means Lagos time (+01:00).
 - **SQLite enforces persistence constraints.** Primary/foreign keys, unique booking references and range/status checks are in `src/db/schema.sql`; seat reservations use one conditional update inside a transaction.
 - **Waitlists are persisted in SQLite.** Entries are ordered FIFO by join time, and `(tier_id, customer_key)` is unique. Promoting the queue head reserves seats, creates the pending booking, and removes that entry in one transaction.
-- **The attendee ID is a demo identity, not authentication.** The browser persists a generated `x-user-id` in local storage so it can identify its own bookings and waitlist entries.
+- **Authentication is stateless.** A one-hour HS256 bearer token identifies the user and role. `AUTH_TOKEN_SECRET` must be a stable random secret of at least 32 bytes. Public signup creates attendees and organizers; staff is provisioned by an administrator.
+- **Pending bookings expire.** `expires_at` is set 24 hours after booking. Expired pending bookings are transitioned to cancelled and release their seats before the next booking attempt.
 
 ---
 
@@ -207,9 +215,10 @@ stateDiagram-v2
 - The moves are **data** (`MOVES` in `src/domain/bookingStateMachine.js`). The diagram above is generated from that data, and `test/booking-state-machine.test.js` fails if this picture and the code ever disagree. To refresh it, run:
   `node -e "import('./src/domain/bookingStateMachine.js').then(m => console.log(m.bookingStatesToMermaid()))"`
 
-**Where later stories plug in:** S07, S09 and S10 will be built on these moves, for example *payment* is the move `pending → paid`,
-*refund* is `paid → refunded`, and *check-in* is `paid → checked_in`. They will call `transitionBooking`; none of them may set a status itself.
-Rules about *when* a move is allowed (for example, no check-in before the event starts) belong to those stories, on top of the table.
+**How services use these moves:** S07 payment calls the booking service, which validates the `pending → paid` move and
+charges through the mock gateway. Future refund and check-in services will use `paid → refunded` and `paid → checked_in`;
+none may set a status directly. Rules about *when* a move is allowed (for example, no check-in before the event starts)
+belong to those stories, on top of the table.
 
 ---
 
@@ -223,7 +232,7 @@ Built on `node:http` only, with no outside packages.
 | `POST /api/events`, `GET /api/events`, `GET /api/events/:id`, `POST /api/events/:id/tiers\|publish\|unpublish` | the event routes (see [api.md](api.md)) |
 | `POST /api/bookings`, `GET /api/bookings/:reference`, `POST /api/bookings/:reference/pay`, `POST /api/bookings/:reference/cancel` | the booking routes |
 | `GET /api/events/:id/waitlists`, `POST /api/events/:eventId/tiers/:tierId/waitlist`, `DELETE /api/events/:eventId/tiers/:tierId/waitlist/:entryId`, `POST /api/events/:eventId/tiers/:tierId/waitlist/next/book` | persistent FIFO waitlist routes; owner identity is checked for leaving and booking the queue head |
-| `POST /api/dev/bookings/:reference/transition` | **demo mode only** (`npm run start:demo`): a practice route for the state machine |
+| `POST /api/dev/bookings/:reference/transition` | **demo mode only** (`npm run start:demo`): staff-only practice route for the state machine |
 | any unknown `/api/...` path | `404 {"error":{"code":"NOT_FOUND","message":"..."}}` |
 | a known path with the wrong method | `405` + an `Allow` header |
 | a body that is not valid JSON | `400 {"error":{"code":"BAD_JSON","message":"..."}}` |

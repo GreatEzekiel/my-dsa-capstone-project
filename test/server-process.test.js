@@ -11,11 +11,12 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const SERVER = fileURLToPath(new URL('../src/server.js', import.meta.url));
+const AUTH_TOKEN_SECRET = 'test-token-secret-for-integration-tests-only';
 
 // Starts the server with the given environment. Resolves when it says it is running, or when it exits.
 function start(env) {
   const child = spawn(process.execPath, [SERVER], {
-    env: { ...process.env, DATABASE_PATH: ':memory:', ...env },
+    env: { ...process.env, DATABASE_PATH: ':memory:', AUTH_TOKEN_SECRET, ...env },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let out = '';
@@ -77,7 +78,7 @@ test('npm start: the PORT variable is honoured', async () => {
 
 test('npm start: with no PORT it would use 3000 (checked through the config, so the test cannot clash with a real server)', async () => {
   const { loadConfig } = await import('../src/config.js');
-  assert.equal(loadConfig({}).port, 3000);
+  assert.equal(loadConfig({ AUTH_TOKEN_SECRET }).port, 3000);
 });
 
 test('a bad PORT stops the program with a clear one-line message and exit code 1, and no stack trace', async () => {
@@ -117,10 +118,23 @@ test('SQLite data survives a real server restart', async () => {
     const firstUrl = await first.running;
     assert.ok(firstUrl, `first server did not start: ${first.output().err}`);
 
+    const organizerResponse = await fetch(`${firstUrl}/api/auth/signup`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: 'organizer@example.test', password: 'valid-password', role: 'organizer' }),
+    });
+    const organizerToken = (await organizerResponse.json()).token;
+    const attendeeResponse = await fetch(`${firstUrl}/api/auth/signup`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: 'attendee@example.test', password: 'valid-password' }),
+    });
+    const attendeeToken = (await attendeeResponse.json()).token;
+
     const startsAt = new Date(Date.now() + 30 * 86_400_000).toISOString();
     const eventResponse = await fetch(`${firstUrl}/api/events`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${organizerToken}` },
       body: JSON.stringify({ title: 'Persistent event', city: 'Lagos', venue: 'Hall', startsAt }),
     });
     assert.equal(eventResponse.status, 201);
@@ -128,16 +142,19 @@ test('SQLite data survives a real server restart', async () => {
 
     const tierResponse = await fetch(`${firstUrl}/api/events/${event.id}/tiers`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${organizerToken}` },
       body: JSON.stringify({ name: 'General', priceCents: 500, capacity: 2 }),
     });
     assert.equal(tierResponse.status, 201);
     const { tier } = await tierResponse.json();
-    assert.equal((await fetch(`${firstUrl}/api/events/${event.id}/publish`, { method: 'POST' })).status, 200);
+    assert.equal((await fetch(`${firstUrl}/api/events/${event.id}/publish`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${organizerToken}` },
+    })).status, 200);
 
     const bookingResponse = await fetch(`${firstUrl}/api/bookings`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-user-id': 'persistent-user' },
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${attendeeToken}` },
       body: JSON.stringify({ eventId: event.id, tierId: tier.id, quantity: 1, customer: 'Ada' }),
     });
     assert.equal(bookingResponse.status, 201);
@@ -153,7 +170,9 @@ test('SQLite data survives a real server restart', async () => {
     const persistedEvent = await fetch(`${secondUrl}/api/events/${event.id}`);
     assert.equal(persistedEvent.status, 200);
     assert.equal((await persistedEvent.json()).event.tiers[0].sold, 1);
-    const persistedBooking = await fetch(`${secondUrl}/api/bookings/${booking.reference}`);
+    const persistedBooking = await fetch(`${secondUrl}/api/bookings/${booking.reference}`, {
+      headers: { Authorization: `Bearer ${attendeeToken}` },
+    });
     assert.equal(persistedBooking.status, 200);
     assert.equal((await persistedBooking.json()).booking.id, booking.id);
   } finally {

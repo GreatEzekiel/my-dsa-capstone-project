@@ -351,7 +351,7 @@ describe('the server', () => {
 describe('HTTP statuses for business-rule errors', () => {
   test('EVERY domain error code has an HTTP status (add a line to HTTP_STATUS_BY_DOMAIN_CODE when you add a code)', () => {
     assert.deepEqual(Object.keys(HTTP_STATUS_BY_DOMAIN_CODE).sort(), Object.keys(ErrorCode).sort());
-    for (const status of Object.values(HTTP_STATUS_BY_DOMAIN_CODE)) assert.ok([400, 402, 404, 409].includes(status));
+    for (const status of Object.values(HTTP_STATUS_BY_DOMAIN_CODE)) assert.ok([400, 401, 402, 403, 404, 409].includes(status));
   });
 
   test('describeError: HttpError, DomainError and bugs', () => {

@@ -1,4 +1,4 @@
-# Event Ticketing: Builds 1–5
+# Event Ticketing: Builds 1–7
 
 The rules of an event ticketing system, built from an empty folder.
 
@@ -18,6 +18,10 @@ The rules of an event ticketing system, built from an empty folder.
 - **Build 5 (SQLite and overselling fix):** the API stores data in SQLite across restarts, and a conditional atomic
   seat reservation ensures that 50 simultaneous attempts to buy the last ticket produce exactly one booking. Run
   `npm run oversell` to see the vulnerable check-then-write race and the fixed result.
+- **Build 6 (checkout UI):** the React app browses, filters and sorts live REST data, books tickets, shows the 24-hour
+  checkout hold, and supports a mock payment decline followed by a retry.
+- **Build 7 (accounts and roles):** scrypt password hashes, expiring HS256 bearer tokens, attendee/organizer/staff
+  permissions, private attendee bookings, organizer event ownership, and React ticket and organizer screens.
 
 - **The domain core** is plain JavaScript (ES modules, Node 22.13+, no runtime packages) and runs in the terminal.
   The API uses Node's built-in SQLite support; there are no runtime packages.
@@ -35,10 +39,13 @@ npm run demo:search    # Build 2: draft -> publish -> search, filter and sort, i
 npm run benchmark      # Map.get vs Array.find (lookup by reference code)
 npm run benchmark:sort # our merge sort O(n log n) vs insertion sort O(n squared)
 
-npm start              # Build 5: SQLite-backed API on http://localhost:3000
+cp .env.example .env
+# Set AUTH_TOKEN_SECRET in .env to a random value of at least 32 bytes. Keep it stable between restarts.
+npm start              # Build 7: authenticated SQLite-backed API on http://localhost:3000
 npm run start:demo     # the same, seeds 4 sample events + 1 draft only if the database is empty, and enables the practice route
                        #   try http://localhost:3000/health  and  http://localhost:3000/
 npm run seed           # add the demo events once if the configured database is empty
+npm run create:staff   # provision trusted staff: set STAFF_EMAIL and STAFF_PASSWORD in the environment first
 npm run dev            # in another terminal: React UI at http://localhost:5173 (Vite proxies /api to port 3000)
 npm run oversell       # show the last-ticket race before and after the atomic SQLite fix
 # DATABASE_PATH=/path/to/data.sqlite npm start  # store the database at a chosen path
@@ -62,15 +69,16 @@ The demos, benchmarks, server and `test:node` need no packages at all: they run 
 ```
 src/
   server.js                `npm start`: reads config, opens SQLite, plugs the parts together, listens
-  config.js                PORT, HOST and DATABASE_PATH from the environment, checked
+  config.js                PORT, HOST, DATABASE_PATH and required AUTH_TOKEN_SECRET, checked
   http/                    LAYER 1, routes: the web plumbing (no business rules)
     app.js                 the server: body reading, routing, errors, static files
     router.js              method + path with :params
     routes.js              the URLs the server answers: /health, events, search, bookings, waitlists (see docs/api.md)
+    guards.js              bearer-token authentication and role checks
     errors.js              HttpError + ONE error shape + domain code -> HTTP status table
     staticFiles.js         files from public/, with path-traversal defences
   services/                LAYER 2, services: the use cases, no HTTP
-    healthService.js  eventService.js  bookingService.js  waitlistService.js  index.js
+    authService.js    healthService.js  eventService.js  bookingService.js  waitlistService.js  index.js
     demoData.js            sample events for `npm run start:demo`
   repositories/            LAYER 4, async API repositories
     sqlite.js              persistent events, tiers, bookings and atomic seat reservations
@@ -80,12 +88,13 @@ src/
     connection.js           creates the database and applies the schema
   lib/                     infrastructure adapters
     mockPaymentGateway.js  mock payment without card details
+    password.js  token.js  scrypt password hashing and expiring HS256 tokens
   domain/                  LAYER 3, shared business rules
     errors.js              DomainError + the list of error codes
     bookingStateMachine.js the booking life cycle as DATA: states, allowed moves, canTransition, assertTransition
     ids.js  money.js  dates.js  waitlistQueue.js  sorting.js  eventSearch.js   (pure rules)
     inventory.js           in-memory domain store used by terminal demos/tests
-  ui/                      REST-backed React client (fetch wrapper in api.js)
+  ui/                      REST-backed React client, session storage and auth screens (fetch wrapper in api.js)
 public/                    files the server serves: index.html, styles.css, app.js, favicon.svg
 postman/                   the Postman collection (84 requests) + environment
 scripts/                   demos, benchmarks, seed.js and oversell-demo.js
@@ -104,7 +113,7 @@ docs/
   architecture.md          THE THREE DIAGRAMS: layers, data model, booking life cycle
   api.md                   every POST and GET request, with examples and error codes
   postman.md               how to test the API with Postman
-  build-2.md  build-3.md  build-4.md  build-5.md  build briefs and "Done when" checks
+  build-2.md  build-3.md  build-4.md  build-5.md  build-6.md  build-7.md  build briefs and "Done when" checks
   api-examples.md          curl examples for the REST API
   user-stories.md          the backlog: stories + acceptance criteria + definition of done
   code-walkthrough.md      every snippet explained in plain language (start here to learn)
@@ -144,6 +153,11 @@ Every file has comments explaining each snippet, and **`docs/code-walkthrough.md
 | You can only join the waitlist when the request **can't be booked now** | `joinWaitlist` |
 | A booking is found by its code, typed any way (case, spaces, hyphen ignored; `O` read as `0`, `I`/`L` as `1`) | `findBookingByReference`, `referenceKey` |
 | Returned bookings **can't be edited** by callers (they are frozen) | `bookTickets`, `cancelBooking` |
+| Passwords are stored only as salted scrypt hashes; tokens are signed, expire, and accept only HS256 | `lib/password.js`, `lib/token.js`, `authService.js` |
+| Public signup can create attendees or organizers; staff is created only by `npm run create:staff` | `authService.js`, `scripts/create-staff.js` |
+| Attendees can list, read, pay and cancel only their own bookings; cross-account access returns `FORBIDDEN` | `guards.js`, `bookingService.js` |
+| Organizers can edit only their own events; event ownership is persisted | `eventService.js`, `repositories/sqlite.js` |
+| Pending checkout holds expire after 24 hours; the next booking request releases expired seats atomically | `bookingService.js`, `repositories/sqlite.js` |
 
 ### "A failed booking changes nothing"
 

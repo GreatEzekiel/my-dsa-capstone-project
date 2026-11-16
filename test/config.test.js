@@ -5,8 +5,10 @@ import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { ConfigError, DEFAULT_HOST, DEFAULT_PORT, loadConfig } from '../src/config.js';
 
+const AUTH_ENV = { AUTH_TOKEN_SECRET: 'test-token-secret-for-integration-tests-only' };
+
 test('with nothing set: port 3000, this computer only', () => {
-  const config = loadConfig({});
+  const config = loadConfig(AUTH_ENV);
   assert.equal(config.port, 3000);
   assert.equal(DEFAULT_PORT, 3000);
   assert.equal(config.host, DEFAULT_HOST);
@@ -15,35 +17,35 @@ test('with nothing set: port 3000, this computer only', () => {
 });
 
 test('DATABASE_PATH can point the server at a chosen SQLite file', () => {
-  assert.equal(loadConfig({ DATABASE_PATH: '/tmp/ticketing.sqlite' }).databasePath, '/tmp/ticketing.sqlite');
-  assert.equal(loadConfig({ DATABASE_PATH: '  ' }).databasePath.endsWith('data/event-ticketing.sqlite'), true);
+  assert.equal(loadConfig({ ...AUTH_ENV, DATABASE_PATH: '/tmp/ticketing.sqlite' }).databasePath, '/tmp/ticketing.sqlite');
+  assert.equal(loadConfig({ ...AUTH_ENV, DATABASE_PATH: '  ' }).databasePath.endsWith('data/event-ticketing.sqlite'), true);
 });
 
 test('PORT comes from the environment', () => {
-  assert.equal(loadConfig({ PORT: '8080' }).port, 8080);
-  assert.equal(loadConfig({ PORT: '0' }).port, 0); // 0 = any free port
-  assert.equal(loadConfig({ PORT: '65535' }).port, 65535);
-  assert.equal(loadConfig({ PORT: ' 4000 ' }).port, 4000); // spaces are ignored
+  assert.equal(loadConfig({ ...AUTH_ENV, PORT: '8080' }).port, 8080);
+  assert.equal(loadConfig({ ...AUTH_ENV, PORT: '0' }).port, 0); // 0 = any free port
+  assert.equal(loadConfig({ ...AUTH_ENV, PORT: '65535' }).port, 65535);
+  assert.equal(loadConfig({ ...AUTH_ENV, PORT: ' 4000 ' }).port, 4000); // spaces are ignored
 });
 
 test('an empty PORT means "not set"', () => {
-  assert.equal(loadConfig({ PORT: '' }).port, 3000);
-  assert.equal(loadConfig({ PORT: '   ' }).port, 3000);
+  assert.equal(loadConfig({ ...AUTH_ENV, PORT: '' }).port, 3000);
+  assert.equal(loadConfig({ ...AUTH_ENV, PORT: '   ' }).port, 3000);
 });
 
 test('a PORT that is not a whole number from 0 to 65535 stops start-up with a ConfigError', () => {
   for (const bad of ['abc', '3000abc', 'abc3000', '-1', '65536', '99999', '123456', '1e3', '3.5', '0x50', '80 80', 'NaN']) {
-    assert.throws(() => loadConfig({ PORT: bad }), (e) => e instanceof ConfigError && /PORT must be/.test(e.message), bad);
+    assert.throws(() => loadConfig({ ...AUTH_ENV, PORT: bad }), (e) => e instanceof ConfigError && /PORT must be/.test(e.message), bad);
   }
 });
 
 test('HOST can be set, and blank means the default', () => {
-  assert.equal(loadConfig({ HOST: '0.0.0.0' }).host, '0.0.0.0');
-  assert.equal(loadConfig({ HOST: '  ' }).host, '127.0.0.1');
+  assert.equal(loadConfig({ ...AUTH_ENV, HOST: '0.0.0.0' }).host, '0.0.0.0');
+  assert.equal(loadConfig({ ...AUTH_ENV, HOST: '  ' }).host, '127.0.0.1');
 });
 
 test('the settings are frozen, and publicDir is the real public/ folder', () => {
-  const config = loadConfig({});
+  const config = loadConfig(AUTH_ENV);
   assert.throws(() => { config.port = 1; }, TypeError);
   assert.ok(config.publicDir.endsWith('public'));
   assert.ok(existsSync(config.publicDir));
@@ -51,6 +53,20 @@ test('the settings are frozen, and publicDir is the real public/ folder', () => 
 
 test('it reads process.env when no environment is given', () => {
   const old = process.env.PORT;
+  const oldSecret = process.env.AUTH_TOKEN_SECRET;
   process.env.PORT = '4321';
-  try { assert.equal(loadConfig().port, 4321); } finally { if (old === undefined) delete process.env.PORT; else process.env.PORT = old; }
+  process.env.AUTH_TOKEN_SECRET = AUTH_ENV.AUTH_TOKEN_SECRET;
+  try { assert.equal(loadConfig().port, 4321); } finally {
+    if (old === undefined) delete process.env.PORT; else process.env.PORT = old;
+    if (oldSecret === undefined) delete process.env.AUTH_TOKEN_SECRET; else process.env.AUTH_TOKEN_SECRET = oldSecret;
+  }
+});
+
+test('a missing or short token secret prevents startup', () => {
+  for (const AUTH_TOKEN_SECRET of ['', 'short']) {
+    assert.throws(
+      () => loadConfig({ AUTH_TOKEN_SECRET }),
+      (error) => error instanceof ConfigError && /AUTH_TOKEN_SECRET/.test(error.message),
+    );
+  }
 });

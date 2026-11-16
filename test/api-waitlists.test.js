@@ -6,18 +6,18 @@ async function setup(t, capacity = 1) {
   const server = await startApp();
   t.after(() => server.close());
   const api = apiClient(server.url);
-  const event = await server.services.events.create({
+  const event = (await api.post('/api/events', {
     title: 'Waitlist API',
     city: 'Lagos',
     venue: 'Test Hall',
     startsAt: new Date(Date.now() + 30 * 86_400_000).toISOString(),
-  });
-  const tier = await server.services.events.addTier(event.id, {
+  })).body.event;
+  const tier = (await api.post(`/api/events/${event.id}/tiers`, {
     name: 'General',
     priceCents: 500,
     capacity,
-  });
-  await server.services.events.publish(event.id);
+  })).body.tier;
+  await api.post(`/api/events/${event.id}/publish`);
   return { api, event, tier };
 }
 
@@ -52,13 +52,14 @@ test('waitlist routes keep FIFO order, reject duplicate names and stop direct bo
   }, { 'x-user-id': 'dayo-id' });
   assert.equal(second.body.position, 2);
 
-  const list = await api.get(`/api/events/${event.id}/waitlists`, { 'x-user-id': 'chidi-id' });
+  const list = await api.get(`/api/events/${event.id}/waitlists`);
   assert.deepEqual(list.body.waitlists[0].entries.map(({ customer, position, isMine }) => ({
     customer, position, isMine,
   })), [
-    { customer: 'Chidi', position: 1, isMine: true },
+    { customer: 'Chidi', position: 1, isMine: false },
     { customer: 'Dayo', position: 2, isMine: false },
   ]);
+  expectError(await api.get(`/api/events/${event.id}/waitlists`, { 'x-user-id': 'other-organizer' }), 403, 'FORBIDDEN');
   assert.equal((await api.get(`/api/events/${event.id}`)).body.event.tiers[0].waitlistSize, 2);
 
   const jump = await api.post('/api/bookings', {

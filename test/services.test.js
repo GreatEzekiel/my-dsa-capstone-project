@@ -75,7 +75,7 @@ test('the booking service books, pays, finds, cancels and refuses invalid state 
     'user-1',
   );
   assert.equal(booking.status, 'pending');
-  assert.equal((await bookings.get(booking.reference.toLowerCase())).id, booking.id);
+  assert.equal((await bookings.get(booking.reference.toLowerCase(), 'user-1')).id, booking.id);
   assert.equal((await bookings.pay(booking.reference, 'user-1', {})).status, 'paid');
   await assert.rejects(bookings.pay(booking.reference, 'user-1', {}), { code: 'INVALID_TRANSITION' });
   await assert.rejects(bookings.cancel(booking.reference, 'user-1'), { code: 'INVALID_TRANSITION' });

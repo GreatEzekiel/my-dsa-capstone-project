@@ -13,7 +13,7 @@ function text(value, field) {
 }
 
 function requiredUserId(value) {
-  return text(value, 'x-user-id');
+  return text(value, 'userId');
 }
 
 function requiredId(value, field) {
@@ -40,10 +40,28 @@ function updatedBooking(booking, status, now) {
   };
 }
 
-export function createBookingService({ repository, paymentGateway, now = () => Date.now() }) {
+export function createBookingService({
+  repository,
+  paymentGateway,
+  now = () => Date.now(),
+  bookingHoldMs = 24 * 60 * 60 * 1000,
+}) {
   if (!repository) throw new TypeError('createBookingService needs a repository');
   if (!paymentGateway || typeof paymentGateway.charge !== 'function') {
     throw new TypeError('createBookingService needs a payment gateway');
+  }
+  if (!Number.isSafeInteger(bookingHoldMs) || bookingHoldMs < 1) {
+    throw new TypeError('createBookingService needs a positive booking hold duration');
+  }
+
+  async function expirePendingBookings() {
+    const before = new Date(now()).toISOString();
+    const expired = await repository.listExpiredPendingBookings(before);
+    await Promise.all(expired.map((booking) => repository.transitionBooking(
+      booking.reference,
+      BookingState.PENDING,
+      updatedBooking(booking, BookingState.CANCELLED, now),
+    )));
   }
 
   async function bookingFor(reference) {
@@ -54,7 +72,9 @@ export function createBookingService({ repository, paymentGateway, now = () => D
   }
 
   function assertOwner(booking, userId) {
-    if (booking.userId !== userId) throw notFound();
+    if (booking.userId !== userId) {
+      throw new DomainError(ErrorCode.FORBIDDEN, 'You can only access your own bookings');
+    }
   }
 
   async function transition(booking, to) {
@@ -73,6 +93,7 @@ export function createBookingService({ repository, paymentGateway, now = () => D
 
   return Object.freeze({
     async book(input, rawUserId) {
+      await expirePendingBookings();
       const userId = requiredUserId(rawUserId);
       const data = asObject(input);
       const eventId = requiredId(data.eventId, 'eventId');
@@ -123,6 +144,7 @@ export function createBookingService({ repository, paymentGateway, now = () => D
         totalCents: tier.priceCents * quantity,
         status: BookingState.PENDING,
         createdAt: at,
+        expiresAt: new Date(now() + bookingHoldMs).toISOString(),
         history: [{ status: BookingState.PENDING, at }],
       };
       const created = await repository.createBooking(booking);
@@ -143,11 +165,22 @@ export function createBookingService({ repository, paymentGateway, now = () => D
       return publicBooking(created);
     },
 
-    async get(reference) {
-      return publicBooking(await bookingFor(reference));
+    async get(reference, rawUserId) {
+      await expirePendingBookings();
+      const booking = await bookingFor(reference);
+      assertOwner(booking, requiredUserId(rawUserId));
+      return publicBooking(booking);
+    },
+
+    async listForUser(rawUserId) {
+      await expirePendingBookings();
+      const userId = requiredUserId(rawUserId);
+      const bookings = await repository.listBookings();
+      return bookings.filter((booking) => booking.userId === userId).map(publicBooking);
     },
 
     async pay(reference, rawUserId, input) {
+      await expirePendingBookings();
       const userId = requiredUserId(rawUserId);
       if (input !== undefined && (input === null || typeof input !== 'object' || Array.isArray(input))) {
         throw bad('body', 'must be an object');
@@ -163,6 +196,9 @@ export function createBookingService({ repository, paymentGateway, now = () => D
 
       const booking = await bookingFor(reference);
       assertOwner(booking, userId);
+      if (booking.expiresAt && Date.parse(booking.expiresAt) <= now()) {
+        throw new DomainError(ErrorCode.BOOKING_EXPIRED, 'The checkout hold has expired');
+      }
       assertTransition(booking.status, BookingState.PAID);
 
       const payment = await paymentGateway.charge({
@@ -178,9 +214,13 @@ export function createBookingService({ repository, paymentGateway, now = () => D
     },
 
     async cancel(reference, rawUserId) {
+      await expirePendingBookings();
       const userId = requiredUserId(rawUserId);
       const booking = await bookingFor(reference);
       assertOwner(booking, userId);
+      if (booking.expiresAt && Date.parse(booking.expiresAt) <= now()) {
+        throw new DomainError(ErrorCode.BOOKING_EXPIRED, 'The checkout hold has expired');
+      }
       if (booking.status === BookingState.CANCELLED) {
         throw new DomainError(ErrorCode.ALREADY_CANCELLED, `Booking ${booking.reference} is already cancelled`, { reference: booking.reference });
       }
@@ -197,6 +237,7 @@ export function createBookingService({ repository, paymentGateway, now = () => D
     },
 
     async transition(reference, to) {
+      await expirePendingBookings();
       if (typeof to !== 'string' || to === '') {
         throw bad('to', 'is required (one of pending, paid, cancelled, refunded, checked_in)');
       }
