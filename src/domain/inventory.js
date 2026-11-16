@@ -13,13 +13,10 @@ import { parseWhen } from './dates.js';
 import { BookingState, assertTransition, holdsSeats } from './bookingStateMachine.js';
 import { EventStatus } from './eventStatus.js';
 import { isMoney } from './money.js';
+import { MAX_PRICE_CENTS, MAX_TICKETS_PER_BOOKING, MIN_TICKETS } from './ticketLimits.js';
 import { Queue } from './waitlistQueue.js';
 
-export const MIN_TICKETS = 1;
-export const MAX_TICKETS_PER_BOOKING = 10; // business rule: 1 to 10 per booking
-// The biggest price we accept. A booking total is price x quantity, and JavaScript numbers are only
-// exact up to Number.MAX_SAFE_INTEGER, so the price must be small enough that price x 10 stays exact.
-export const MAX_PRICE_CENTS = Math.floor(Number.MAX_SAFE_INTEGER / MAX_TICKETS_PER_BOOKING);
+export { MAX_PRICE_CENTS, MAX_TICKETS_PER_BOOKING, MIN_TICKETS } from './ticketLimits.js';
 
 // ---------- validation helpers ----------
 

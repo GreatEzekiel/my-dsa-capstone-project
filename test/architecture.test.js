@@ -38,10 +38,14 @@ function resolveImport(file, specifier) {
 }
 
 const files = listFiles();
-const layerOf = (file) => (file === 'domain/inventory.js' ? 'data' : file.split('/')[0] === 'domain' ? 'rules' : file.split('/')[0]);
+const layerOf = (file) => {
+  if (file === 'domain/inventory.js' || file.startsWith('repositories/')) return 'data';
+  if (file.startsWith('domain/')) return 'rules';
+  return file.split('/')[0];
+};
 
 test('the project has the layers the architecture document describes', () => {
-  for (const folder of ['http', 'services', 'domain']) assert.ok(existsSync(path.join(SRC, folder)), `src/${folder} is missing`);
+  for (const folder of ['http', 'services', 'domain', 'repositories', 'lib']) assert.ok(existsSync(path.join(SRC, folder)), `src/${folder} is missing`);
   assert.ok(files.includes('http/router.js') && files.includes('http/app.js') && files.includes('domain/bookingStateMachine.js'));
 });
 
@@ -64,20 +68,32 @@ test('RULES (src/domain, pure) import only other rule files and Node built-ins: 
   }
 });
 
-test('DATA (inventory.js) imports only rules', () => {
-  for (const specifier of importsOf('domain/inventory.js')) {
-    const target = resolveImport('domain/inventory.js', specifier);
-    if (target.external) assert.ok(target.external.startsWith('node:'), `inventory.js imports the package "${specifier}"`);
-    else assert.equal(layerOf(target.internal), 'rules', `inventory.js imports ${target.internal}`);
+test('DATA (inventory and repositories) imports only rules and Node built-ins', () => {
+  for (const file of files.filter((f) => layerOf(f) === 'data')) {
+    for (const specifier of importsOf(file)) {
+      const target = resolveImport(file, specifier);
+      if (target.external) assert.ok(target.external.startsWith('node:'), `${file} imports the package "${specifier}"`);
+      else assert.equal(layerOf(target.internal), 'rules', `${file} imports ${target.internal}`);
+    }
   }
 });
 
-test('SERVICES import only services, rules and data: never http', () => {
+test('SERVICES import only services and rules: data and payment implementations are injected', () => {
   for (const file of files.filter((f) => layerOf(f) === 'services')) {
     for (const specifier of importsOf(file)) {
       const target = resolveImport(file, specifier);
       if (target.external) assert.ok(target.external.startsWith('node:'), `${file} imports the package "${specifier}"`);
-      else assert.ok(['services', 'rules', 'data'].includes(layerOf(target.internal)), `${file} (services) imports ${target.internal}: services must not call upwards`);
+      else assert.ok(['services', 'rules'].includes(layerOf(target.internal)), `${file} (services) imports ${target.internal}: dependencies must be injected`);
+    }
+  }
+});
+
+test('infrastructure adapters import no application layer', () => {
+  for (const file of files.filter((f) => f.startsWith('lib/'))) {
+    for (const specifier of importsOf(file)) {
+      const target = resolveImport(file, specifier);
+      if (target.external) assert.ok(target.external.startsWith('node:'), `${file} imports the package "${specifier}"`);
+      else assert.equal(target.internal.startsWith('lib/'), true, `${file} imports ${target.internal}`);
     }
   }
 });
@@ -105,18 +121,17 @@ test('the React screen (src/ui) never imports the server code', () => {
   }
 });
 
-test('the server is built from Node itself: no outside packages are used by src/http, src/services, src/domain or the config', () => {
+test('the server is built from Node itself: no outside packages are used by application code', () => {
   const pkg = JSON.parse(readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
   assert.equal(pkg.dependencies, undefined, 'package.json has runtime dependencies');
-  for (const file of files.filter((f) => ['http', 'services', 'rules', 'data'].includes(layerOf(f)) || f === 'config.js' || f === 'server.js')) {
+  for (const file of files.filter((f) => ['http', 'services', 'rules', 'data', 'lib'].includes(layerOf(f)) || f === 'config.js' || f === 'server.js')) {
     for (const specifier of importsOf(file)) assert.ok(specifier.startsWith('.') || specifier.startsWith('node:'), `${file} imports "${specifier}"`);
   }
 });
 
-test('route handlers contain no business rules: routes.js only calls services', () => {
+test('route handlers contain no business rules or persistence: routes.js only calls services', () => {
   const source = readFileSync(path.join(SRC, 'http/routes.js'), 'utf8').replace(/\/\/.*$/gm, '');
-  // No direct use of the data functions or the state machine from a route.
-  for (const forbidden of ['bookTickets', 'cancelBooking', 'transitionBooking', 'assertTransition', 'createStore', 'inventory']) {
+  for (const forbidden of ['bookTickets', 'cancelBooking', 'transitionBooking', 'assertTransition', 'createStore', 'inventory', 'repository', 'paymentGateway']) {
     assert.ok(!source.includes(forbidden), `routes.js mentions ${forbidden}: that belongs in a service`);
   }
   assert.match(source, /services\./); // it does call a service

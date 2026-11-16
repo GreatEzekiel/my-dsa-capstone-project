@@ -78,7 +78,7 @@ describe('in demo mode', () => {
     assert.equal(await b.seatsLeft(), seatsBefore);
   });
 
-  test('a refund gives the seats back; cancelling a paid booking does too', async () => {
+  test('a refund gives the seats back; the Build 4 cancel endpoint refuses paid bookings', async () => {
     const a = await newBooking(2, 5);
     await a.move('paid');
     assert.equal(await a.seatsLeft(), 3);
@@ -88,8 +88,9 @@ describe('in demo mode', () => {
     const c = await newBooking(2, 5);
     await c.move('paid');
     const cancelled = await api.post(`/api/bookings/${c.booking.reference}/cancel`);
-    assert.equal(cancelled.status, 200);
-    assert.equal(await c.seatsLeft(), 5);
+    expectError(cancelled, 409, 'INVALID_TRANSITION');
+    assert.equal(await c.status(), 'paid');
+    assert.equal(await c.seatsLeft(), 3);
   });
 
   test('a booking that was checked in cannot be cancelled: 409 INVALID_TRANSITION (not ALREADY_CANCELLED)', async () => {

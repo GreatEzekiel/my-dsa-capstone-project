@@ -1,40 +1,42 @@
-// eventService.js
-// The "events" use cases: create an event, add tiers, publish it, look it up, search for it.
-//
-// A service sits BETWEEN the web routes and the domain. It knows nothing about HTTP (no request, no response,
-// no status codes). It receives plain values, calls the rules and the data, and returns plain values.
-// The routes decide how to say it in HTTP; the domain decides what is allowed.
-
 import { DomainError, ErrorCode } from '../domain/errors.js';
+import { parseWhen } from '../domain/dates.js';
 import { searchEvents } from '../domain/eventSearch.js';
-import {
-  addTier, createEvent, getEventDetails, listEventSummaries, publishEvent, unpublishEvent,
-} from '../domain/inventory.js';
+import { EventStatus } from '../domain/eventStatus.js';
+import { newId } from '../domain/ids.js';
+import { isMoney } from '../domain/money.js';
+import { MAX_PRICE_CENTS } from '../domain/ticketLimits.js';
 
-// The search options a client may send. Anything else is a mistake (probably a typo) and is refused,
-// instead of being silently ignored: "?citty=Lagos" returning every event would be a nasty surprise.
 const FILTERS = ['q', 'city', 'from', 'to', 'maxPriceCents', 'onlyAvailable'];
 const SEARCH_KEYS = new Set([...FILTERS, 'sort']);
+const bad = (field, message) => new DomainError(ErrorCode.VALIDATION, `${field}: ${message}`, { field });
+const asObject = (value) => (value !== null && typeof value === 'object' && !Array.isArray(value) ? value : {});
 
-// Values arrive from a URL, so they are ALL text ("?maxPriceCents=500000" is the text "500000").
-// An empty value ("?city=") means "not given", like an empty box in a form.
+function text(value, field) {
+  if (typeof value !== 'string' || value.trim() === '') throw bad(field, 'is required');
+  return value.trim();
+}
+
+function id(value, field) {
+  if (typeof value !== 'string' || value.trim() === '') throw bad(field, 'is required');
+  return value;
+}
+
+function requireEvent(event) {
+  if (!event) throw new DomainError(ErrorCode.NOT_FOUND, 'Event not found');
+  return event;
+}
+
+function toWhole(value) {
+  return value !== undefined && /^\d+$/.test(value) ? Number(value) : value;
+}
+
 const given = (value) => (value === undefined || value === '' ? undefined : value);
-
-// Digits only -> a number. Anything else is left as the text it was, and the rules refuse it with VALIDATION
-// ("9.99", "-5", "abc", "1e3" are not whole numbers of cents).
-const toWhole = (value) => (value !== undefined && /^\d+$/.test(value) ? Number(value) : value);
-
-// "true" / "false" -> a boolean. Anything else is left as text, and the rules refuse it.
 const toBoolean = (value) => (value === 'true' ? true : value === 'false' ? false : value);
 
-/**
- * Turns the text values of a query string into the criteria the search rules understand.
- * It only converts types. Whether a value is VALID (a real date, a whole price) is the rules' decision.
- */
 export function queryToCriteria(params = {}) {
   for (const key of Object.keys(params)) {
     if (!SEARCH_KEYS.has(key)) {
-      throw new DomainError(ErrorCode.VALIDATION, `${key}: is not a search option. Use: ${[...SEARCH_KEYS].join(', ')}`, { field: key });
+      throw bad(key, `is not a search option. Use: ${[...SEARCH_KEYS].join(', ')}`);
     }
   }
   return {
@@ -50,40 +52,89 @@ export function queryToCriteria(params = {}) {
   };
 }
 
-export function createEventService({ store }) {
+export function createEventService({ repository, now = () => Date.now() }) {
+  if (!repository) throw new TypeError('createEventService needs a repository');
+
+  async function details(event) {
+    const tiers = await repository.listTiersForEvent(event.id);
+    return {
+      ...event,
+      started: parseWhen(event.startsAt, 'startsAt') <= now(),
+      tiers: tiers.map((tier) => ({ ...tier, seatsLeft: tier.capacity - tier.sold })),
+    };
+  }
+
   return Object.freeze({
-    /** Creates a DRAFT event. Returns it with its (empty) list of tiers. */
-    create(input) {
-      const event = createEvent(store, input);
-      return getEventDetails(store, event.id);
+    async create(input) {
+      const data = asObject(input);
+      const event = {
+        id: newId(),
+        title: text(data.title ?? data.name, 'title'),
+        city: text(data.city, 'city'),
+        venue: text(data.venue, 'venue'),
+        startsAt: text(data.startsAt ?? data.date, 'startsAt'),
+        status: EventStatus.DRAFT,
+      };
+      parseWhen(event.startsAt, 'startsAt');
+      return details(await repository.createEvent(event));
     },
 
-    /** One event with its tiers. Drafts can be read by id too: they are hidden from the LIST, not secret. */
-    get(eventId) {
-      return getEventDetails(store, eventId);
+    async get(eventId) {
+      return details(requireEvent(await repository.getEvent(id(eventId, 'eventId'))));
     },
 
-    /** Adds a ticket tier. Returns the tier (0 sold, all seats left). */
-    addTier(eventId, input) {
-      return addTier(store, eventId, input);
+    async addTier(eventId, input) {
+      const event = requireEvent(await repository.getEvent(id(eventId, 'eventId')));
+      const data = asObject(input);
+      const name = text(data.name, 'name');
+      if (!isMoney(data.priceCents) || data.priceCents > MAX_PRICE_CENTS) {
+        throw bad('priceCents', `must be a whole number of cents from 0 to ${MAX_PRICE_CENTS}`);
+      }
+      if (!Number.isSafeInteger(data.capacity) || data.capacity < 1) {
+        throw bad('capacity', 'must be a whole number of 1 or more');
+      }
+      const tier = await repository.createTier({
+        id: newId(),
+        eventId: event.id,
+        name,
+        priceCents: data.priceCents,
+        capacity: data.capacity,
+        sold: 0,
+      });
+      return { ...tier, seatsLeft: tier.capacity };
     },
 
-    /** Makes the event public. It needs at least one tier. */
-    publish(eventId) {
-      publishEvent(store, eventId);
-      return getEventDetails(store, eventId);
+    async publish(eventId) {
+      const event = requireEvent(await repository.getEvent(id(eventId, 'eventId')));
+      if ((await repository.listTiersForEvent(event.id)).length === 0) {
+        throw new DomainError(ErrorCode.INVALID_STATE, `Add at least one ticket tier to ${event.title} before publishing`, { eventId });
+      }
+      return details(await repository.saveEvent({ ...event, status: EventStatus.PUBLISHED }));
     },
 
-    /** Takes the event off the public list (existing bookings are kept). */
-    unpublish(eventId) {
-      unpublishEvent(store, eventId);
-      return getEventDetails(store, eventId);
+    async unpublish(eventId) {
+      const event = requireEvent(await repository.getEvent(id(eventId, 'eventId')));
+      return details(await repository.saveEvent({ ...event, status: EventStatus.DRAFT }));
     },
 
-    /** Searches the PUBLISHED events. `params` are the raw text values of a query string. */
-    search(params) {
+    async search(params) {
       const { criteria, sort } = queryToCriteria(params);
-      const events = searchEvents(listEventSummaries(store), criteria, sort);
+      const published = (await repository.listEvents()).filter((event) => event.status === EventStatus.PUBLISHED);
+      const summaries = await Promise.all(published.map(async (event) => {
+        const tiers = await repository.listTiersForEvent(event.id);
+        return {
+          id: event.id,
+          title: event.title,
+          city: event.city,
+          venue: event.venue,
+          startsAt: event.startsAt,
+          status: event.status,
+          tierCount: tiers.length,
+          minPriceCents: tiers.length ? Math.min(...tiers.map((tier) => tier.priceCents)) : null,
+          seatsLeft: tiers.reduce((sum, tier) => sum + tier.capacity - tier.sold, 0),
+        };
+      }));
+      const events = searchEvents(summaries, criteria, sort);
       return { count: events.length, events };
     },
   });
