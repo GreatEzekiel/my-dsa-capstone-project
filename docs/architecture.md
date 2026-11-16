@@ -12,7 +12,7 @@ VS Code (with a Mermaid extension) draw them for you.
 
 ## 1. The layers
 
-The system is built in four layers. A request enters at the top and moves **down**. **Nothing calls upwards.**
+The request path has four layers. A request enters at the top and moves **down**. **Nothing calls upwards.**
 
 ```mermaid
 flowchart TD
@@ -36,40 +36,48 @@ flowchart TD
         helpers["eventSearch, sorting, dates, money, ids, waitlistQueue"]
     end
 
-    subgraph data["4. Data  ·  src/domain/inventory.js"]
-        store[("in-memory store<br/>events, tiers, bookings, waitlists")]
+    subgraph data["4. Data  ·  src/repositories"]
+        repo[("memory repository<br/>events, tiers, bookings")]
     end
+
+    subgraph infrastructure["Payment adapter  ·  src/lib"]
+        gateway["mockPaymentGateway"]
+    end
+    composition["server.js<br/>composition root"]
 
     client -->|"HTTP request"| routes
     routes -->|"calls one service function"| services
     services -->|"asks"| rules
-    services -->|"reads and writes"| data
-    data -->|"applies"| rules
+    services -->|"reads and writes through injected repository"| data
+    data -->|"checks booking moves"| rules
+    services -->|"calls injected payment interface"| gateway
+    composition -.->|"injects"| repo
+    composition -.->|"injects"| gateway
 ```
 
 **What each layer may and may not do** (one sentence each):
 
 - **Routes** (`src/http`) may read the request (method, path, `:params`, JSON body), call one service function and turn its result or its error into a JSON response, but may not contain business rules, touch the data, or import the rules directly.
-- **Services** (`src/services`) may combine rules and data into one use case ("pay a booking") and decide the order of the steps, but may not know about HTTP (no request, no response, no status codes) or call a route.
+- **Services** (`src/services`) may combine rules and injected repository/payment interfaces into one use case ("pay a booking") and decide the order of the steps, but may not know about HTTP (no request, no response, no status codes) or import a concrete repository or gateway.
 - **Rules** (`src/domain`, the pure files) may only decide things from the values they are given (is this move allowed? does this event match?) and throw a `DomainError`, but may not read or write data, touch the network, files or the clock, or call any other layer.
-- **Data** (`src/domain/inventory.js`) may store and fetch records and keep them consistent (seats sold always match the bookings), but may not know about HTTP or services, and must ask the rules before it changes a booking's status.
+- **Data** (`src/repositories`) may store and fetch records and keep them consistent (seats sold always match the bookings), but may not know about HTTP or services, and must consult the rules before it changes a booking's status.
 
 **The dependency rule, in one table.** `test/architecture.test.js` reads every `import` in the project and fails if an arrow points the wrong way.
 
 | A file in... | may import from |
 |--------------|-----------------|
 | `src/http` (routes) | `src/http`, `src/services`, and **only** `domain/errors.js` (to recognise errors) |
-| `src/services` | `src/services`, `src/domain` |
+| `src/services` | `src/services`, `src/domain`; repositories and payment gateways are injected |
 | `src/domain` (rules) | other rule files, never `inventory.js`, never `services` or `http` |
-| `src/domain/inventory.js` (data) | `src/domain` rule files |
+| `src/repositories` (data) | `src/domain` rule files |
+| `src/lib` (payment adapter) | Node built-ins only; it receives no card number |
 | `src/ui` (React) | `src/domain` for now (see below) |
 
 **Where things are today.** The pure rules are separate files: `bookingStateMachine.js`, `eventSearch.js`,
-`sorting.js`, `dates.js`, `money.js`, `ids.js`, `waitlistQueue.js`. Rules that must happen *together with* a data change
-(never sell more seats than exist, people waiting go first) live in `inventory.js`, next to the data they protect.
-When a real database arrives, `inventory.js` splits into repositories (data) and services (the use cases around them).
-The services folder holds three services today: `eventService` (create, tiers, publish, search), `bookingService` (book, find, cancel) and `healthService`.
-The payment, refund and check-in services arrive with the stories that need them (S07, S09, S10...).
+`sorting.js`, `dates.js`, `money.js`, `ids.js`, `waitlistQueue.js`. The API uses the asynchronous
+`repositories/memory.js`; it is replaced by a persistent repository in a later build. The older `domain/inventory.js`
+remains the browser UI's local data layer. The services folder holds `eventService`, `bookingService` and `healthService`.
+The booking service receives the mock gateway through dependency injection; the gateway never sees card data.
 
 **The React screen** (`src/ui`) is a separate client. The API now has event and booking routes, but the screen still runs the domain in
 the browser; switching it to call the HTTP API (and dropping the domain import) is a later step.
@@ -118,7 +126,7 @@ erDiagram
         string reference UK "short readable code like 7K2M-9Q4X"
         string eventId FK
         string tierId FK
-        string userId FK "planned, today a customer name"
+        string userId "caller id from x-user-id; no user table yet"
         string customer "name on the booking"
         int quantity "1 to 10"
         int totalCents "price times quantity"
@@ -137,7 +145,7 @@ erDiagram
 
 Notes:
 
-- **`USER` does not exist in the code yet.** It is in the picture because organizers and attendees arrive in a later build. Fields marked *planned* are the ones that will be added then. Today a booking carries only the customer's name.
+- **`USER` does not exist in the code yet.** Build 4 accepts an `x-user-id` header to associate a booking with its caller, but it does not authenticate that user or store a user record.
 - **Money is whole cents** (kobo): `500000` is ₦5,000.00. Never decimals.
 - **`sold` follows the bookings:** it counts the seats of every booking in a state that holds seats (`pending`, `paid`, `checked_in`). `cancelled` and `refunded` give them back.
 - **A tier belongs to exactly one event**, and a booking is for exactly one tier (1 to 10 tickets).
@@ -178,7 +186,7 @@ stateDiagram-v2
 - Exactly five moves are allowed (the arrows above). Of the 25 possible (from, to) pairs, 20 are illegal, including moving to the state you are already in.
 - `cancelled`, `refunded` and `checked_in` are **final**: nothing leaves them.
 - A move that gives seats back (to `cancelled` or `refunded`) releases them in the same step; a refused move changes nothing.
-- Every status change goes through **one function**, `transitionBooking`, which asks the state machine first. Nothing else sets `status`.
+- The booking service asks the state machine before every status change; the repository applies the change only if the stored status still matches, and updates seat counts with it.
 - Every change is recorded in the booking's `history`.
 - The moves are **data** (`MOVES` in `src/domain/bookingStateMachine.js`). The diagram above is generated from that data, and `test/booking-state-machine.test.js` fails if this picture and the code ever disagree. To refresh it, run:
   `node -e "import('./src/domain/bookingStateMachine.js').then(m => console.log(m.bookingStatesToMermaid()))"`
@@ -197,7 +205,7 @@ Built on `node:http` only, with no outside packages.
 |---------|----------|
 | `GET /health` | `200 {"status":"ok"}` |
 | `POST /api/events`, `GET /api/events`, `GET /api/events/:id`, `POST /api/events/:id/tiers\|publish\|unpublish` | the event routes (see [api.md](api.md)) |
-| `POST /api/bookings`, `GET /api/bookings/:reference`, `POST /api/bookings/:reference/cancel` | the booking routes |
+| `POST /api/bookings`, `GET /api/bookings/:reference`, `POST /api/bookings/:reference/pay`, `POST /api/bookings/:reference/cancel` | the booking routes |
 | `POST /api/dev/bookings/:reference/transition` | **demo mode only** (`npm run start:demo`): a practice route for the state machine |
 | any unknown `/api/...` path | `404 {"error":{"code":"NOT_FOUND","message":"..."}}` |
 | a known path with the wrong method | `405` + an `Allow` header |

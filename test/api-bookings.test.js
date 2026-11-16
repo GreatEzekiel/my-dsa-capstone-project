@@ -1,11 +1,11 @@
 // api-bookings.test.js: the booking routes, over real HTTP.
 //   POST /api/bookings                      book tickets (S06)
 //   GET  /api/bookings/:reference           find a booking by its code
-//   POST /api/bookings/:reference/cancel    cancel it, give the seats back
+//   POST /api/bookings/:reference/pay       pay with the mock gateway
+//   POST /api/bookings/:reference/cancel    cancel an unpaid booking
 
 import test, { after, before, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { listBookings } from '../src/domain/inventory.js';
 import { apiClient, expectError, startApp } from './http-helpers.js';
 
 const startsInDays = (n) => new Date(Date.now() + n * 86_400_000).toISOString();
@@ -58,12 +58,12 @@ describe('the booking API', () => {
     test('with 1 seat left, booking 2 -> 409 SOLD_OUT, and nothing changes', async () => {
       const { event, book, seatsLeft } = await setup({ capacity: 3 });
       await book(2);
-      const count = listBookings(server.store, { eventId: event.id }).length;
+      const count = (await server.repository.listBookings({ eventId: event.id })).length;
       const res = await book(2);
       expectError(res, 409, 'SOLD_OUT');
       assert.match(res.body.error.message, /Only 1 left/);
       assert.equal(await seatsLeft(), 1);
-      assert.equal(listBookings(server.store, { eventId: event.id }).length, count);
+      assert.equal((await server.repository.listBookings({ eventId: event.id })).length, count);
     });
 
     test('a quantity of 0, a negative, a fraction, more than 10, or text -> 400 VALIDATION, and nothing is saved', async () => {
@@ -74,7 +74,7 @@ describe('the booking API', () => {
         assert.match(res.body.error.message, /quantity/);
       }
       assert.equal(await seatsLeft(), 50);
-      assert.equal(listBookings(server.store, { eventId: event.id }).length, 0);
+      assert.equal((await server.repository.listBookings({ eventId: event.id })).length, 0);
     });
 
     test('1 and 10 tickets are allowed', async () => {
@@ -176,7 +176,7 @@ describe('the booking API', () => {
       for (const r of refused) assert.equal(r.body.error.code, 'SOLD_OUT');
       assert.equal(new Set(succeeded.map((r) => r.body.booking.reference)).size, 5); // five different codes
       assert.equal(await seatsLeft(), 0);
-      assert.equal(listBookings(server.store, { eventId: event.id }).length, 5);
+      assert.equal((await server.repository.listBookings({ eventId: event.id })).length, 5);
     });
 
     test('parallel bookings of different sizes never take more seats than exist', async () => {
@@ -220,6 +220,114 @@ describe('the booking API', () => {
     });
   });
 
+  describe('POST /api/bookings/:reference/pay (S07: mock payment)', () => {
+    test('a successful mock payment changes pending to paid and records history', async () => {
+      const { book } = await setup();
+      const { booking } = (await book(1, 'Ada', { userId: 'not-the-caller' })).body;
+      const response = await api.post(`/api/bookings/${booking.reference}/pay`, { mockResult: 'success' });
+      assert.equal(response.status, 200);
+      assert.equal(response.body.booking.status, 'paid');
+      assert.deepEqual(response.body.booking.history.map((entry) => entry.status), ['pending', 'paid']);
+      assert.equal('userId' in response.body.booking, false);
+    });
+
+    test('booking requires x-user-id from the request header', async () => {
+      const response = await fetch(`${server.url}/api/bookings`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ eventId: 'event', tierId: 'tier', quantity: 1, customer: 'Ada' }),
+      });
+      const text = await response.text();
+      expectError({ status: response.status, body: JSON.parse(text), text }, 400, 'VALIDATION');
+    });
+
+    test('a paid booking cannot be charged again', async () => {
+      let charges = 0;
+      const paymentGateway = {
+        async charge({ bookingId, decline }) {
+          assert.equal(typeof bookingId, 'string');
+          assert.equal(typeof decline, 'boolean');
+          charges += 1;
+          return { status: 'succeeded' };
+        },
+      };
+      const paymentServer = await startApp({ paymentGateway });
+      try {
+        const paymentApi = apiClient(paymentServer.url);
+        const event = (await paymentApi.post('/api/events', {
+          title: 'One charge', city: 'Lagos', venue: 'Hall', startsAt: startsInDays(30),
+        })).body.event;
+        const tier = (await paymentApi.post(`/api/events/${event.id}/tiers`, {
+          name: 'General', priceCents: 500, capacity: 2,
+        })).body.tier;
+        await paymentApi.post(`/api/events/${event.id}/publish`);
+        const booking = (await paymentApi.post('/api/bookings', {
+          eventId: event.id, tierId: tier.id, quantity: 1, customer: 'Ada',
+        })).body.booking;
+
+        assert.equal((await paymentApi.post(`/api/bookings/${booking.reference}/pay`, {})).status, 200);
+        expectError(
+          await paymentApi.post(`/api/bookings/${booking.reference}/pay`, {}),
+          409,
+          'INVALID_TRANSITION',
+        );
+        assert.equal(charges, 1);
+      } finally {
+        await paymentServer.close();
+      }
+    });
+
+    test('a declined payment leaves the booking pending so the attendee can retry', async () => {
+      const { book } = await setup();
+      const { booking } = (await book(1)).body;
+      expectError(
+        await api.post(`/api/bookings/${booking.reference}/pay`, { mockResult: 'declined' }),
+        402,
+        'PAYMENT_DECLINED',
+      );
+      assert.equal((await api.get(`/api/bookings/${booking.reference}`)).body.booking.status, 'pending');
+      assert.equal(
+        (await api.post(`/api/bookings/${booking.reference}/pay`, { mockResult: 'success' })).body.booking.status,
+        'paid',
+      );
+    });
+
+    test('only the booking owner can pay, and a mismatch does not reveal the booking', async () => {
+      const { book } = await setup();
+      const { booking } = (await book(1)).body;
+      expectError(
+        await api.post(`/api/bookings/${booking.reference}/pay`, { mockResult: 'success' }, { 'x-user-id': 'someone-else' }),
+        404,
+        'NOT_FOUND',
+      );
+      assert.equal((await api.get(`/api/bookings/${booking.reference}`)).body.booking.status, 'pending');
+    });
+
+    test('cancelled or already-paid bookings cannot be paid', async () => {
+      const cancelled = await setup();
+      const cancelledBooking = (await cancelled.book(1)).body.booking;
+      await api.post(`/api/bookings/${cancelledBooking.reference}/cancel`);
+      expectError(await api.post(`/api/bookings/${cancelledBooking.reference}/pay`, {}), 409, 'INVALID_TRANSITION');
+
+      const paid = await setup();
+      const paidBooking = (await paid.book(1)).body.booking;
+      await api.post(`/api/bookings/${paidBooking.reference}/pay`, { mockResult: 'success' });
+      expectError(await api.post(`/api/bookings/${paidBooking.reference}/pay`, { mockResult: 'success' }), 409, 'INVALID_TRANSITION');
+    });
+
+    test('payment input never accepts card numbers or unknown payment fields', async () => {
+      const { book } = await setup();
+      const { booking } = (await book(1)).body;
+      for (const body of [
+        { cardNumber: '4111111111111111' },
+        { mockResult: null },
+      ]) {
+        expectError(await api.post(`/api/bookings/${booking.reference}/pay`, body), 400, 'VALIDATION');
+      }
+      assert.equal((await api.get(`/api/bookings/${booking.reference}`)).body.booking.status, 'pending');
+    });
+  });
+
   describe('POST /api/bookings/:reference/cancel', () => {
     test('200: the booking is cancelled and its seats come back', async () => {
       const { book, seatsLeft } = await setup({ capacity: 3 });
@@ -251,6 +359,17 @@ describe('the booking API', () => {
 
     test('an unknown reference -> 404', async () => {
       expectError(await api.post('/api/bookings/ZZZZ-ZZZZ/cancel'), 404, 'NOT_FOUND');
+    });
+
+    test('only the booking owner can cancel', async () => {
+      const { book } = await setup();
+      const { booking } = (await book(1)).body;
+      expectError(
+        await api.post(`/api/bookings/${booking.reference}/cancel`, {}, { 'x-user-id': 'someone-else' }),
+        404,
+        'NOT_FOUND',
+      );
+      assert.equal((await api.get(`/api/bookings/${booking.reference}`)).body.booking.status, 'pending');
     });
 
     test('freed seats can be booked by someone else', async () => {

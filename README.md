@@ -1,4 +1,4 @@
-# Event Ticketing: Builds 1, 2 and 3
+# Event Ticketing: Builds 1–4
 
 The rules of an event ticketing system, built from an empty folder.
 
@@ -12,8 +12,9 @@ The rules of an event ticketing system, built from an empty folder.
   such as paying a cancelled booking; and a **web server** on `node:http` that answers `/health`, returns JSON errors in one
   shape, and serves static files from `public/` without ever letting a request escape that folder. Test it with **Postman**
   (`docs/postman.md`).
-- **The API (POST and GET):** create events, add tiers, publish, search/filter/sort, book tickets, read and cancel bookings, all over HTTP
-  (`docs/api.md`), with a Postman collection of 84 requests whose tests chain the requests together.
+- **Build 4 (working REST API):** create events and tiers, publish, search/filter/sort, book, pay with a mock gateway,
+  read and cancel bookings over HTTP (`docs/api.md`). Data is held in an injected in-memory repository. Follow
+  [the curl examples](docs/api-examples.md) or test with Postman (`docs/postman.md`).
 
 - **The domain core** is plain JavaScript (ES modules, Node 22.13+, no runtime packages) and runs in the terminal.
   No server, no database.
@@ -31,7 +32,7 @@ npm run demo:search    # Build 2: draft -> publish -> search, filter and sort, i
 npm run benchmark      # Map.get vs Array.find (lookup by reference code)
 npm run benchmark:sort # our merge sort O(n log n) vs insertion sort O(n squared)
 
-npm start              # Build 3: the web server on http://localhost:3000  (PORT=3001 npm start for another port)
+npm start              # Build 4: the web server on http://localhost:3000  (PORT=3001 npm start for another port)
 npm run start:demo     # the same, plus 4 sample events and the practice-only booking-transition route (needed by Postman folder 5)
                        #   try http://localhost:3000/health  and  http://localhost:3000/
 
@@ -65,11 +66,15 @@ src/
   services/                LAYER 2, services: the use cases, no HTTP
     healthService.js  eventService.js  bookingService.js  index.js
     demoData.js            sample events for `npm run start:demo`
-  domain/                  LAYERS 3 and 4: the rules (pure) and the data
+  repositories/            LAYER 4, async in-memory API repository
+    memory.js              events, tiers, bookings and seat reservations
+  lib/                     infrastructure adapters
+    mockPaymentGateway.js  mock payment without card details
+  domain/                  LAYER 3, rules (plus the browser's local inventory)
     errors.js              DomainError + the list of error codes
     bookingStateMachine.js the booking life cycle as DATA: states, allowed moves, canTransition, assertTransition
     ids.js  money.js  dates.js  waitlistQueue.js  sorting.js  eventSearch.js   (pure rules)
-    inventory.js           the data: in-memory store + events, tiers, publishing, bookings, transitionBooking, waitlist
+    inventory.js           browser UI data: in-memory store, events, bookings and waitlist
   ui/                      the React screen (search panel + event page)
 public/                    files the server serves: index.html, styles.css, app.js, favicon.svg
 postman/                   the Postman collection (84 requests) + environment
@@ -80,7 +85,7 @@ test/
   booking-lifecycle.test.js           the state machine on REAL bookings + 4,000 random moves
   router.test.js  http.test.js  static.test.js  config.test.js  services.test.js
   server-process.test.js              starts the real `node src/server.js` and calls /health
-  api-events.test.js  api-bookings.test.js  api-dev.test.js   the POST and GET routes over real HTTP (events, search, bookings, life cycle)
+  api-events.test.js  api-bookings.test.js  api-dev.test.js   routes over real HTTP, including mock payments
   architecture.test.js                "nothing calls upwards", checked from the imports
   domain.test.js  dates.test.js  sorting.test.js  s02..s06 story tests  error-codes.test.js
   ui/app.test.jsx                     the real screen in a fake browser (Vitest)
@@ -88,7 +93,8 @@ docs/
   architecture.md          THE THREE DIAGRAMS: layers, data model, booking life cycle
   api.md                   every POST and GET request, with examples and error codes
   postman.md               how to test the API with Postman
-  build-2.md  build-3.md   the briefs and how to check "Done when"
+  build-2.md  build-3.md  build-4.md   the briefs and how to check "Done when"
+  api-examples.md         curl examples for every Build 4 endpoint
   user-stories.md          the backlog: stories + acceptance criteria + definition of done
   code-walkthrough.md      every snippet explained in plain language (start here to learn)
   ai-log.md                what the AI got wrong, how it was found, how it was fixed

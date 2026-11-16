@@ -8,6 +8,9 @@ import {
   createStore, createEvent, addTier, publishEvent, bookTickets, cancelBooking, findBookingByReference,
   joinWaitlist, transitionBooking,
 } from '../src/domain/inventory.js';
+import { createMockPaymentGateway } from '../src/lib/mockPaymentGateway.js';
+import { createMemoryRepository } from '../src/repositories/memory.js';
+import { createServices } from '../src/services/index.js';
 import { code, inDays, publishedEvent } from './helpers.js';
 
 // Each entry makes a fresh situation and returns a function that should throw that code.
@@ -80,6 +83,31 @@ for (const [expected, arrange] of Object.entries(TRIGGERS)) {
 }
 
 test('every code in ErrorCode has a test above (add a trigger when you add a code)', () => {
-  assert.deepEqual(Object.keys(TRIGGERS).sort(), Object.keys(ErrorCode).sort());
+  assert.deepEqual([...Object.keys(TRIGGERS), 'PAYMENT_DECLINED'].sort(), Object.keys(ErrorCode).sort());
   for (const [key, value] of Object.entries(ErrorCode)) assert.equal(key, value); // the code equals its own name
+});
+
+test('PAYMENT_DECLINED is triggered by the booking service and leaves the booking pending', async () => {
+  const { events, bookings } = createServices({
+    repository: createMemoryRepository(),
+    paymentGateway: {
+      async charge() {
+        return { status: 'declined' };
+      },
+    },
+  });
+  const event = await events.create({
+    title: 'Payment test', city: 'Lagos', venue: 'Hall', startsAt: inDays(10),
+  });
+  const tier = await events.addTier(event.id, { name: 'GA', priceCents: 500, capacity: 2 });
+  await events.publish(event.id);
+  const booking = await bookings.book(
+    { eventId: event.id, tierId: tier.id, quantity: 1, customer: 'Ada' },
+    'attendee-1',
+  );
+  await assert.rejects(
+    bookings.pay(booking.reference, 'attendee-1', { mockResult: 'declined' }),
+    { code: 'PAYMENT_DECLINED' },
+  );
+  assert.equal((await bookings.get(booking.reference)).status, 'pending');
 });

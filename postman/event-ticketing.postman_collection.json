@@ -1207,6 +1207,11 @@
                 "key": "Content-Type",
                 "value": "application/json",
                 "type": "text"
+              },
+              {
+                "key": "x-user-id",
+                "value": "postman-attendee",
+                "type": "text"
               }
             ],
             "url": {
@@ -1347,6 +1352,11 @@
                 "key": "Content-Type",
                 "value": "application/json",
                 "type": "text"
+              },
+              {
+                "key": "x-user-id",
+                "value": "postman-attendee",
+                "type": "text"
               }
             ],
             "url": {
@@ -1391,6 +1401,11 @@
               {
                 "key": "Content-Type",
                 "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "x-user-id",
+                "value": "postman-attendee",
                 "type": "text"
               }
             ],
@@ -1437,6 +1452,11 @@
                 "key": "Content-Type",
                 "value": "application/json",
                 "type": "text"
+              },
+              {
+                "key": "x-user-id",
+                "value": "postman-attendee",
+                "type": "text"
               }
             ],
             "url": {
@@ -1482,6 +1502,11 @@
                 "key": "Content-Type",
                 "value": "application/json",
                 "type": "text"
+              },
+              {
+                "key": "x-user-id",
+                "value": "postman-attendee",
+                "type": "text"
               }
             ],
             "url": {
@@ -1526,6 +1551,11 @@
               {
                 "key": "Content-Type",
                 "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "x-user-id",
+                "value": "postman-attendee",
                 "type": "text"
               }
             ],
@@ -1574,6 +1604,11 @@
                 "key": "Content-Type",
                 "value": "application/json",
                 "type": "text"
+              },
+              {
+                "key": "x-user-id",
+                "value": "postman-attendee",
+                "type": "text"
               }
             ],
             "url": {
@@ -1613,7 +1648,13 @@
           ],
           "request": {
             "method": "POST",
-            "header": [],
+            "header": [
+              {
+                "key": "x-user-id",
+                "value": "postman-attendee",
+                "type": "text"
+              }
+            ],
             "url": {
               "raw": "{{baseUrl}}/api/bookings/{{referenceCheap}}/cancel",
               "host": [
@@ -1647,7 +1688,13 @@
           ],
           "request": {
             "method": "POST",
-            "header": [],
+            "header": [
+              {
+                "key": "x-user-id",
+                "value": "postman-attendee",
+                "type": "text"
+              }
+            ],
             "url": {
               "raw": "{{baseUrl}}/api/bookings/{{reference}}/cancel",
               "host": [
@@ -1679,7 +1726,13 @@
           ],
           "request": {
             "method": "POST",
-            "header": [],
+            "header": [
+              {
+                "key": "x-user-id",
+                "value": "postman-attendee",
+                "type": "text"
+              }
+            ],
             "url": {
               "raw": "{{baseUrl}}/api/bookings/{{reference}}/cancel",
               "host": [
@@ -1779,6 +1832,11 @@
                 "key": "Content-Type",
                 "value": "application/json",
                 "type": "text"
+              },
+              {
+                "key": "x-user-id",
+                "value": "postman-attendee",
+                "type": "text"
               }
             ],
             "url": {
@@ -1859,6 +1917,11 @@
               {
                 "key": "Content-Type",
                 "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "x-user-id",
+                "value": "postman-attendee",
                 "type": "text"
               }
             ],
@@ -2050,6 +2113,11 @@
                 "key": "Content-Type",
                 "value": "application/json",
                 "type": "text"
+              },
+              {
+                "key": "x-user-id",
+                "value": "postman-attendee",
+                "type": "text"
               }
             ],
             "url": {
@@ -2090,7 +2158,13 @@
           ],
           "request": {
             "method": "POST",
-            "header": [],
+            "header": [
+              {
+                "key": "x-user-id",
+                "value": "postman-attendee",
+                "type": "text"
+              }
+            ],
             "url": {
               "raw": "{{baseUrl}}/api/bookings/{{lc}}/cancel",
               "host": [
@@ -2206,6 +2280,11 @@
               {
                 "key": "Content-Type",
                 "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "x-user-id",
+                "value": "postman-attendee",
                 "type": "text"
               }
             ],

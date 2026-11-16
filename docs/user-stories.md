@@ -119,6 +119,32 @@ will be built on. Each of those stories is a move in the state machine: payment 
 `paid → refunded`, and check-in is `paid → checked_in`. The moves are already written down, and illegal ones are already
 refused and tested. The acceptance criteria for those stories are written when each one is built.
 
+## Build 4: working REST API
+
+Stories S02–S06 now pass through the REST API as well as their domain tests. The API uses an in-memory repository,
+so its data is reset when the server restarts. See [Build 4](build-4.md) and [API examples](api-examples.md).
+
+### S07: As an attendee, I want to pay for a booking (mock payment), so that the booking is confirmed
+
+- **Given** a pending booking owned by the caller
+  **When** they pay with a successful mock result
+  **Then** the booking becomes `paid` and its reference is returned.
+- **Given** a pending booking owned by the caller
+  **When** the mock payment declines
+  **Then** the request returns `PAYMENT_DECLINED`, the booking stays `pending`, and the caller can retry.
+- **Given** a cancelled booking
+  **When** someone attempts payment
+  **Then** the request is rejected with `INVALID_TRANSITION`.
+- **Given** a booking that is already paid
+  **When** someone attempts payment again
+  **Then** the request is rejected with `INVALID_TRANSITION` and the payment is not charged again.
+- **Given** a booking owned by another caller
+  **When** someone attempts payment
+  **Then** the request returns `NOT_FOUND` and the booking remains unchanged.
+
+The caller is identified by the `x-user-id` request header until authentication is added in a later build. Build 4
+also limits cancellation to the owner of a pending booking.
+
 ## Stories from earlier work (Build 1 rules, no story number yet)
 
 These rules were built in Build 1 and still have tests in `test/domain.test.js`:

@@ -2,9 +2,9 @@
 
 All bodies and answers are JSON. Money is **whole kobo** (`500000` = ₦5,000.00). Dates are ISO strings
 (`2026-12-05T18:00:00+01:00`; a time with no zone means Lagos time). Test everything with Postman: see [postman.md](postman.md).
-
 Start the server with `npm start` (empty) or `npm run start:demo` (4 sample events + 1 draft + the practice route in the last section).
 **The data lives in memory:** it starts empty and is lost when the server stops.
+Booking creation, payment and cancellation use the `x-user-id` header as a temporary caller identity; it is not authentication.
 
 ## The requests at a glance
 
@@ -19,7 +19,8 @@ Start the server with `npm start` (empty) or `npm run start:demo` (4 sample even
 | `POST` | `/api/events/:id/unpublish` | Take it off the public list | `200` |
 | `POST` | `/api/bookings` | Book tickets | `201` + `Location` |
 | `GET` | `/api/bookings/:reference` | Find a booking by its code | `200` |
-| `POST` | `/api/bookings/:reference/cancel` | Cancel it, give the seats back | `200` |
+| `POST` | `/api/bookings/:reference/pay` | Pay with the mock gateway | `200` |
+| `POST` | `/api/bookings/:reference/cancel` | Cancel an unpaid booking and give the seats back | `200` |
 | `POST` | `/api/dev/bookings/:reference/transition` | **Practice only (demo mode)**: move a booking along its life cycle | `200` |
 
 **Errors always look like this**, with a status that matches the code:
@@ -32,6 +33,7 @@ Start the server with `npm start` (empty) or `npm run start:demo` (4 sample even
 |:------:|-------|---------|
 | `400` | `VALIDATION`, `BAD_JSON`, `BAD_REQUEST` | Your request is wrong: fix it and send it again |
 | `404` | `NOT_FOUND` | No such event, booking, route or file |
+| `402` | `PAYMENT_DECLINED` | The mock payment was declined; the booking remains pending |
 | `405` | `METHOD_NOT_ALLOWED` | The path exists, but not with this method (see the `Allow` header) |
 | `409` | `SOLD_OUT`, `ALREADY_CANCELLED`, `INVALID_STATE`, `INVALID_TRANSITION`, `EVENT_STARTED`, `SEATS_AVAILABLE`, `WAITLIST_FIRST`, `ALREADY_WAITING` | Your request is fine, but it clashes with the **current state** of things |
 | `413` / `415` | `PAYLOAD_TOO_LARGE`, `UNSUPPORTED_MEDIA_TYPE` | Body too big / not sent as JSON (`Content-Type: application/json`) |
@@ -100,6 +102,7 @@ Options combine (an event must pass all of them). An **empty** value (`?city=`) 
 ```json
 { "eventId": "3f0c…", "tierId": "9a1b…", "quantity": 2, "customer": "Ada Obi" }
 ```
+Send `x-user-id: attendee-1` with this request. The header value, not any body field, is the temporary owner identity.
 `201 Created`, header `Location: /api/bookings/7K2M-9Q4X`:
 ```json
 { "booking": { "id": "c5d2…", "reference": "7K2M-9Q4X", "eventId": "3f0c…", "tierId": "9a1b…", "quantity": 2,
@@ -122,12 +125,27 @@ The booking starts as `pending` and the seats are held. `status`, `totalCents`, 
 `200 { "booking": { … } }` or `404`. Capitals, spaces and the hyphen don't matter (`7k2m9q4x` works), and `O`/`I`/`L` are read as `0`/`1`.
 **Treat the reference like a password:** it is the only thing protecting a booking's details.
 
+### `POST /api/bookings/:reference/pay` (S07)
+
+Send `x-user-id` for the caller and one of these mock requests:
+
+```json
+{ "mockResult": "success" }
+```
+
+`200 { "booking": { …, "status": "paid", "reference": "7K2M-9Q4X" } }`.
+`{ "mockResult": "declined" }` returns `402 PAYMENT_DECLINED`; the booking stays pending and may be retried.
+Omitting `mockResult` means success. The API rejects any other payment fields (including card details); the gateway
+receives only a booking ID and whether the mock result should decline. Only the booking owner can pay. A mismatch is
+`404 NOT_FOUND`. Paying a cancelled or already-paid booking is `409 INVALID_TRANSITION`; a second charge is not made.
+
 ### `POST /api/bookings/:reference/cancel`
-No body. `200`:
+Send the owner's `x-user-id` header. Only a pending booking may be cancelled in Build 4. `200`:
 ```json
 { "booking": { …, "status": "cancelled", "history": [ { "status": "pending" }, { "status": "cancelled" } ] }, "seatsLeft": 3 }
 ```
-Cancelling twice is `409 ALREADY_CANCELLED` (the seats are not given back twice). A booking that is `refunded` or `checked_in` can't be cancelled: `409 INVALID_TRANSITION`.
+Cancelling twice is `409 ALREADY_CANCELLED` (the seats are not given back twice). A non-owner receives `404 NOT_FOUND`;
+paid, refunded or checked-in bookings can't be cancelled in this build (`409 INVALID_TRANSITION`).
 The answer deliberately does **not** say who is next on the waitlist: that is another customer's name.
 
 ---
@@ -153,4 +171,4 @@ It moves a booking along the life cycle (`pending`, `paid`, `cancelled`, `refund
 
 ## Not built yet (on purpose)
 
-No logins (anyone can create, publish and cancel), no paging, no rate limiting, no waitlist routes, no CORS, and no database (data is lost when the server stops). `docs/ai-log.md` lists each decision.
+No logins (the `x-user-id` value is not authenticated), no paging, no rate limiting, no waitlist routes, no CORS, and no database (data is lost when the server stops). `docs/ai-log.md` lists each decision.

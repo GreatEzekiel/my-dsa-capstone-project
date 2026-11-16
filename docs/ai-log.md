@@ -289,3 +289,46 @@ A second false alarm of the same kind: after the collection's second run failed,
 3. **No waitlist routes**, so `WAITLIST_FIRST`, `ALREADY_WAITING` and `SEATS_AVAILABLE` can't happen over HTTP yet (they are tested in the domain).
 4. **No paging, no logins, no rate limiting, no CORS, no database.**
 5. **Carried over:** started events still appear on the public list; "cheapest tier" includes sold-out tiers; identity is a name.
+
+---
+---
+
+# Build 4: working REST API
+
+I read the Build 3 service, route and test code before changing it. The API had synchronous services tied to the browser
+inventory store, no injected repository or payment gateway, and no payment route. Build 4 now uses an async in-memory
+repository and injected mock gateway; the UI's existing inventory behavior remains separate.
+
+## Checks I ran
+
+| Check | How | Result |
+|-------|-----|--------|
+| Node tests, including real-server API tests | `npm run test:node` | 443 pass, 0 fail |
+| Full Node and UI suite | `npm test` | Pass; 13 UI tests also pass |
+| Production UI | `npm run build` | Pass |
+| Documented API workflow | Ran each curl example against `npm start` on port 3000 | Create, tier, publish, search, read, book, read, pay, cancel pending booking, unpublish and health all passed |
+| Postman file | Parse the updated collection as JSON | Valid |
+| Syntax | `node --check` on the server and changed service modules | Pass |
+
+## Problems found and fixed
+
+| Where | What was wrong | How it was found | Fix |
+|-------|----------------|-----------------|-----|
+| Existing services and API tests | Services were synchronous and exposed the browser store, so they could not exercise the requested async repository boundary. | Read the Build 4 architecture requirements and ran the targeted tests after refactoring | Services now receive repository and gateway dependencies; routes await service calls, and tests inspect the repository through its async API |
+| Existing cancellation endpoint test | It expected a paid booking to be cancelled by the user-facing endpoint, conflicting with Build 4's unpaid-only cancellation rule. | The API test returned `409` where the older test expected `200` | The endpoint now allows only pending bookings; the separate state-machine practice route still tests the valid `paid → cancelled` move |
+| Error mapping | `PAYMENT_DECLINED` was not in the domain error codes or HTTP status table. | The HTTP test requires every domain code to have a status | Added `PAYMENT_DECLINED` with HTTP `402`, plus a service test proving a decline leaves the booking pending |
+| Mock payment validation | An explicit `mockResult: null` would have been treated like an omitted value and succeeded. | Reviewed request edge cases after the first implementation | Only an absent `mockResult` defaults to success; explicit `null` is rejected |
+| Postman collection | Booking and cancellation requests did not send the newly required caller identity. | Searched every request in the collection for booking paths | Added a consistent `x-user-id` header to all 15 affected requests |
+
+## Decisions the brief left open
+
+- **Mock result:** `mockResult` may be `success` or `declined`; omission means success. Unknown fields, including card details, are rejected.
+- **Declined status:** `PAYMENT_DECLINED` uses HTTP `402`; the booking remains pending and can be retried.
+- **Owner mismatch:** pay and cancel return `404 NOT_FOUND` to avoid revealing another caller's booking.
+- **Cancellation:** only an owner may cancel a pending booking in Build 4. The state machine still permits `paid → cancelled` for the practice/later-build life cycle, but the public cancel endpoint does not.
+- **Identity:** `x-user-id` is caller-supplied and is not authentication. Real authentication and users are later work.
+- **Concurrent seats:** the memory repository checks capacity and reserves seats in one synchronous in-memory operation, so parallel async requests cannot oversell. This is not a lock or a database transaction.
+
+## Not built yet
+
+Refund and check-in endpoints, authentication, persistence, waitlist routes and UI-to-API wiring remain later work.

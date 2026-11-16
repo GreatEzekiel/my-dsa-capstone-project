@@ -3,8 +3,9 @@
 // (config -> services -> app). Everything else receives what it needs; nothing else creates the world.
 
 import { ConfigError, loadConfig } from './config.js';
-import { createStore } from './domain/inventory.js';
 import { createApp } from './http/app.js';
+import { createMockPaymentGateway } from './lib/mockPaymentGateway.js';
+import { createMemoryRepository } from './repositories/memory.js';
 import { seedDemoData } from './services/demoData.js';
 import { createServices } from './services/index.js';
 
@@ -23,12 +24,13 @@ try {
   process.exit(1);
 }
 
-// The data lives in memory: it starts empty and is lost when the server stops (a database comes in a later build).
-const store = createStore();
-if (config.demo) seedDemoData(store); // sample events, so GET /api/events has something to show
+// Data starts empty and is lost when the server stops (a database comes in a later build).
+const repository = createMemoryRepository();
+const services = createServices({ repository, paymentGateway: createMockPaymentGateway() });
+if (config.demo) await seedDemoData(services.events);
 
 const app = createApp({
-  services: createServices({ store }),
+  services,
   devRoutes: config.demo, // the practice-only route exists only in demo mode
   publicDir: config.publicDir,
   maxBodyBytes: config.maxBodyBytes,

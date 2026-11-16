@@ -6,7 +6,6 @@
 
 import test, { after, before, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { listEventSummaries } from '../src/domain/inventory.js';
 import { apiClient, expectError, startApp } from './http-helpers.js';
 
 // "Lagos 17:00, n days from now", written with an explicit offset so it never depends on the computer's time zone.
@@ -23,7 +22,7 @@ describe('the event API', () => {
     api = apiClient(server.url);
   });
   after(() => server.close());
-  const everything = () => listEventSummaries(server.store, { publishedOnly: false });
+  const everything = () => server.repository.listEvents();
 
   // Creates an event, gives it tiers, and publishes it. Returns { id, tiers }.
   async function publishedEvent(fields, tiers = [{ name: 'General', priceCents: 500_000, capacity: 10 }]) {
@@ -55,10 +54,9 @@ describe('the event API', () => {
     });
 
     test('it is saved, but NOT on the public list', async () => {
-      const before = everything().length;
+      const before = (await everything()).length;
       const { body } = await api.post('/api/events', NEW_EVENT);
-      assert.equal(everything().length, before + 1);
-      assert.ok(!listEventSummaries(server.store).some((e) => e.id === body.event.id));
+      assert.equal((await everything()).length, before + 1);
       const list = await api.get('/api/events?q=Lagos%20Tech%20Meetup');
       assert.ok(!list.body.events.some((e) => e.id === body.event.id));
     });
@@ -79,7 +77,7 @@ describe('the event API', () => {
     });
 
     test('a missing or blank title, city or venue -> 400 VALIDATION, and nothing is saved', async () => {
-      const before = everything().length;
+      const before = (await everything()).length;
       for (const field of ['title', 'city', 'venue', 'startsAt']) {
         for (const value of [undefined, '', '   ', null, 5]) {
           const body = { ...NEW_EVENT, [field]: value };
@@ -89,15 +87,15 @@ describe('the event API', () => {
           assert.match(res.body.error.message, new RegExp(field));
         }
       }
-      assert.equal(everything().length, before);
+      assert.equal((await everything()).length, before);
     });
 
     test('a date that is not a real date -> 400 VALIDATION', async () => {
-      const before = everything().length;
+      const before = (await everything()).length;
       for (const startsAt of ['2026-02-30', 'tomorrow', '2026-13-01', '05/12/2026', '2026-12-05T25:00:00Z', '2026-12-05 18:00']) {
         expectError(await api.post('/api/events', { ...NEW_EVENT, startsAt }), 400, 'VALIDATION');
       }
-      assert.equal(everything().length, before);
+      assert.equal((await everything()).length, before);
     });
 
     test('a body that is not an object (null, a list, a number, text) or no body at all -> 400, never a 500', async () => {

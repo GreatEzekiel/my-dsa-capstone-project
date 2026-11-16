@@ -9,24 +9,26 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createApp } from '../src/http/app.js';
-import { createStore } from '../src/domain/inventory.js';
 import { registerRoutes } from '../src/http/routes.js';
+import { createMockPaymentGateway } from '../src/lib/mockPaymentGateway.js';
+import { createMemoryRepository } from '../src/repositories/memory.js';
 import { createServices } from '../src/services/index.js';
 
 // The project's real public/ folder.
 export const PUBLIC_DIR = fileURLToPath(new URL('../public', import.meta.url));
 
 /**
- * Starts the app on any free port. Returns { app, store, port, url, logs, close }.
- * `store` is the app's data, so a test can look behind the API and check what was REALLY saved.
+ * Starts the app on any free port. Returns { app, repository, port, url, logs, close }.
+ * `repository` is the app's data, so a test can check what was REALLY saved.
  * `logs` collects what the app wrote to its logger, so a test can check that a bug's stack trace went THERE
  * and not to the client. `extraRoutes(router)` adds routes that exist only for this test.
  */
-export async function startApp({ extraRoutes, publicDir = PUBLIC_DIR, maxBodyBytes, onlyExtra = false, devRoutes = false, now } = {}) {
+export async function startApp({ extraRoutes, publicDir = PUBLIC_DIR, maxBodyBytes, onlyExtra = false, devRoutes = false, now, paymentGateway = createMockPaymentGateway() } = {}) {
   const logs = { info: [], error: [] };
-  const store = createStore(now ? { now } : undefined); // `now` is a fake clock, to travel past an event's start
+  const repository = createMemoryRepository();
+  const services = createServices({ repository, paymentGateway, now });
   const app = createApp({
-    services: createServices({ store }),
+    services,
     publicDir,
     maxBodyBytes,
     devRoutes,
@@ -37,7 +39,7 @@ export async function startApp({ extraRoutes, publicDir = PUBLIC_DIR, maxBodyByt
     },
   });
   const { port, url } = await app.listen(0);
-  return { app, store, port, url, logs, close: () => app.close({ forceAfterMs: 0 }) };
+  return { app, repository, paymentGateway, services, port, url, logs, close: () => app.close({ forceAfterMs: 0 }) };
 }
 
 /**
@@ -124,15 +126,15 @@ export function apiClient(baseUrl) {
   async function call(method, path, body, headers = {}) {
     const response = await fetch(`${baseUrl}${path}`, {
       method,
-      headers: body === undefined ? headers : { 'Content-Type': 'application/json', ...headers },
+      headers: { 'x-user-id': 'test-user', ...(body === undefined ? {} : { 'Content-Type': 'application/json' }), ...headers },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
     const text = await response.text();
     return { status: response.status, headers: response.headers, text, body: text ? JSON.parse(text) : undefined };
   }
   return {
-    get: (path) => call('GET', path),
-    post: (path, body) => call('POST', path, body),
+    get: (path, headers) => call('GET', path, undefined, headers),
+    post: (path, body, headers) => call('POST', path, body, headers),
     call,
     // Same, but sends the text EXACTLY as given (to send broken JSON, or a wrong Content-Type).
     postRaw: (path, text, headers = { 'Content-Type': 'application/json' }) =>

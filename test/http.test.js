@@ -351,7 +351,7 @@ describe('the server', () => {
 describe('HTTP statuses for business-rule errors', () => {
   test('EVERY domain error code has an HTTP status (add a line to HTTP_STATUS_BY_DOMAIN_CODE when you add a code)', () => {
     assert.deepEqual(Object.keys(HTTP_STATUS_BY_DOMAIN_CODE).sort(), Object.keys(ErrorCode).sort());
-    for (const status of Object.values(HTTP_STATUS_BY_DOMAIN_CODE)) assert.ok([400, 404, 409].includes(status));
+    for (const status of Object.values(HTTP_STATUS_BY_DOMAIN_CODE)) assert.ok([400, 402, 404, 409].includes(status));
   });
 
   test('describeError: HttpError, DomainError and bugs', () => {
@@ -373,8 +373,7 @@ describe('starting and stopping', () => {
     const first = await startApp();
     try {
       const { createApp } = await import('../src/http/app.js');
-      const { createServices } = await import('../src/services/index.js');
-      const clash = createApp({ services: createServices(), publicDir: '.' });
+      const clash = createApp({ services: first.services, publicDir: '.' });
       await assert.rejects(clash.listen(first.port), (e) => e.code === 'EADDRINUSE');
     } finally {
       await first.close();
