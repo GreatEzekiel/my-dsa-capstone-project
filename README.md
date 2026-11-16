@@ -1,4 +1,4 @@
-# Event Ticketing: Builds 1–4
+# Event Ticketing: Builds 1–5
 
 The rules of an event ticketing system, built from an empty folder.
 
@@ -13,11 +13,14 @@ The rules of an event ticketing system, built from an empty folder.
   shape, and serves static files from `public/` without ever letting a request escape that folder. Test it with **Postman**
   (`docs/postman.md`).
 - **Build 4 (working REST API):** create events and tiers, publish, search/filter/sort, book, pay with a mock gateway,
-  read and cancel bookings over HTTP (`docs/api.md`). Data is held in an injected in-memory repository. Follow
-  [the curl examples](docs/api-examples.md) or test with Postman (`docs/postman.md`).
+  read and cancel bookings over HTTP (`docs/api.md`). Follow [the curl examples](docs/api-examples.md) or test with
+  Postman (`docs/postman.md`).
+- **Build 5 (SQLite and overselling fix):** the API stores data in SQLite across restarts, and a conditional atomic
+  seat reservation ensures that 50 simultaneous attempts to buy the last ticket produce exactly one booking. Run
+  `npm run oversell` to see the vulnerable check-then-write race and the fixed result.
 
 - **The domain core** is plain JavaScript (ES modules, Node 22.13+, no runtime packages) and runs in the terminal.
-  No server, no database.
+  The API uses Node's built-in SQLite support; there are no runtime packages.
 - **The UI** is React + Tailwind, bundled by Vite. It is a thin screen on top of the same domain code. It adds no rules of its own.
 
 ---
@@ -32,9 +35,12 @@ npm run demo:search    # Build 2: draft -> publish -> search, filter and sort, i
 npm run benchmark      # Map.get vs Array.find (lookup by reference code)
 npm run benchmark:sort # our merge sort O(n log n) vs insertion sort O(n squared)
 
-npm start              # Build 4: the web server on http://localhost:3000  (PORT=3001 npm start for another port)
-npm run start:demo     # the same, plus 4 sample events and the practice-only booking-transition route (needed by Postman folder 5)
+npm start              # Build 5: SQLite-backed API on http://localhost:3000
+npm run start:demo     # the same, seeds 4 sample events + 1 draft only if the database is empty, and enables the practice route
                        #   try http://localhost:3000/health  and  http://localhost:3000/
+npm run seed           # add the demo events once if the configured database is empty
+npm run oversell       # show the last-ticket race before and after the atomic SQLite fix
+# DATABASE_PATH=/path/to/data.sqlite npm start  # store the database at a chosen path
 
 npm test               # EVERY test: the Node tests (domain, HTTP, security, architecture), then the UI tests
 npm run test:node      # only the Node tests (Node's built-in runner, no packages needed)
@@ -55,8 +61,8 @@ The demos, benchmarks, the server and `test:node` need no packages at all: they 
 
 ```
 src/
-  server.js                `npm start`: reads the config, plugs the parts together, listens
-  config.js                PORT and HOST from the environment, checked
+  server.js                `npm start`: reads config, opens SQLite, plugs the parts together, listens
+  config.js                PORT, HOST and DATABASE_PATH from the environment, checked
   http/                    LAYER 1, routes: the web plumbing (no business rules)
     app.js                 the server: body reading, routing, errors, static files
     router.js              method + path with :params
@@ -66,8 +72,12 @@ src/
   services/                LAYER 2, services: the use cases, no HTTP
     healthService.js  eventService.js  bookingService.js  index.js
     demoData.js            sample events for `npm run start:demo`
-  repositories/            LAYER 4, async in-memory API repository
-    memory.js              events, tiers, bookings and seat reservations
+  repositories/            LAYER 4, async API repositories
+    sqlite.js              persistent events, tiers, bookings and atomic seat reservations
+    memory.js              in-memory repository for service tests
+  db/
+    schema.sql              SQLite tables, keys and data constraints
+    connection.js           creates the database and applies the schema
   lib/                     infrastructure adapters
     mockPaymentGateway.js  mock payment without card details
   domain/                  LAYER 3, rules (plus the browser's local inventory)
@@ -78,26 +88,27 @@ src/
   ui/                      the React screen (search panel + event page)
 public/                    files the server serves: index.html, styles.css, app.js, favicon.svg
 postman/                   the Postman collection (84 requests) + environment
-scripts/                   demo.js  demo-search.js  benchmark-lookup.js  benchmark-sort.js
+scripts/                   demos, benchmarks, seed.js and oversell-demo.js
 test/
   helpers.js  http-helpers.js         shared test tools (deepFreeze, code(), a real server, raw requests, a temp site)
   booking-state-machine.test.js       all 25 moves, one by one + the docs diagram matches the code
   booking-lifecycle.test.js           the state machine on REAL bookings + 4,000 random moves
   router.test.js  http.test.js  static.test.js  config.test.js  services.test.js
-  server-process.test.js              starts the real `node src/server.js` and calls /health
+  server-process.test.js              starts the real server, checks /health and restart persistence
   api-events.test.js  api-bookings.test.js  api-dev.test.js   routes over real HTTP, including mock payments
   architecture.test.js                "nothing calls upwards", checked from the imports
   domain.test.js  dates.test.js  sorting.test.js  s02..s06 story tests  error-codes.test.js
+  oversell.test.js  sqlite.test.js    SQLite constraints, seed and 50-way booking race
   ui/app.test.jsx                     the real screen in a fake browser (Vitest)
 docs/
   architecture.md          THE THREE DIAGRAMS: layers, data model, booking life cycle
   api.md                   every POST and GET request, with examples and error codes
   postman.md               how to test the API with Postman
-  build-2.md  build-3.md  build-4.md   the briefs and how to check "Done when"
-  api-examples.md         curl examples for every Build 4 endpoint
+  build-2.md  build-3.md  build-4.md  build-5.md  build briefs and "Done when" checks
+  api-examples.md          curl examples for the REST API
   user-stories.md          the backlog: stories + acceptance criteria + definition of done
   code-walkthrough.md      every snippet explained in plain language (start here to learn)
-  ai-log.md                what the AI got wrong, how it was found, how it was fixed
+  ai-log.md                 what the AI got wrong, how it was found, how it was fixed
 index.html  vite.config.js the React screen's Vite entry and config
 ```
 
@@ -124,6 +135,7 @@ Every file has comments explaining each snippet, and **`docs/code-walkthrough.md
 | Dates are **real ISO dates**; a time with no zone means **Lagos time** | `dates.js` |
 | **Search never changes the list it is given**; results are always new arrays | `eventSearch.js` |
 | **People already waiting go first**: while a tier has a line, strangers can't book freed seats (`WAITLIST_FIRST`) | `bookTickets` |
+| **Concurrent API bookings cannot oversell**: one atomic SQLite update reserves seats only when capacity allows | `repositories/sqlite.js`, `test/oversell.test.js` |
 | One place per person in a tier's line (`ALREADY_WAITING`); anyone can **leave** the line | `joinWaitlist`, `leaveWaitlist` |
 | **No new bookings or joins once the event has started** (`EVENT_STARTED`); cancelling stays allowed | `assertNotStarted` |
 | The store is **sealed**: callers can't edit its data, only use the functions | `createStore`, `stateOf` |

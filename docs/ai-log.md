@@ -332,3 +332,42 @@ repository and injected mock gateway; the UI's existing inventory behavior remai
 ## Not built yet
 
 Refund and check-in endpoints, authentication, persistence, waitlist routes and UI-to-API wiring remain later work.
+
+---
+---
+
+# Build 5: SQLite and the overselling fix
+
+## Checks I ran
+
+| Check | How | Result |
+|-------|-----|--------|
+| Full Node and React test suite | `npm test` | 448 Node tests and 13 UI tests pass |
+| React production build | `npm run build` | Pass |
+| Last-ticket reproduction and fix | `npm run oversell` | Before: 50 bookings, 50/1 sold. After: 1 booking, 49 `SOLD_OUT`, 1/1 sold |
+| Regression-test strength | Temporarily replaced the atomic capacity predicate with a permissive condition, ran `node --test test/oversell.test.js`, then restored it | Test failed as required; after restoration, the targeted regression test passes |
+| SQLite data and constraints | `test/sqlite.test.js` | Pass: required tables, foreign key, primary key, capacity check, unique reference and rollback after a duplicate booking |
+| Seed idempotence | `test/sqlite.test.js` runs `scripts/seed.js` twice on a temporary database | First run seeds 5 events; second run leaves existing data unchanged |
+| Server restart persistence | `test/server-process.test.js` starts and stops the real server twice on one database file | Pass: data remains available after restart |
+
+## Problems found and fixed
+
+| Where | What was wrong or incomplete | How it was found | Fix |
+|-------|------------------------------|------------------|-----|
+| SQLite repository verification | The initial API and concurrency checks did not directly prove the schema's foreign-key, uniqueness and capacity constraints, seed idempotence, or rollback if the booking insert fails. | Reviewed the Build 5 definition of done against the current tests | Added focused SQLite schema and seed tests; a duplicate booking test verifies that the attempted extra seat reservation rolls back |
+| Build 4 documentation | Several pages still said API data was in memory and would be lost on restart after the repository switched to SQLite. | Searched the docs for stale persistence descriptions | Updated the README, API, API examples, Postman troubleshooting and architecture docs |
+| Oversell reproduction vs schema constraint | The production schema must reject `sold > capacity`, which would prevent an intentionally vulnerable example from storing an oversold count. | Compared Prompt 1's required `CHECK` with Prompt 2's before/after demonstration | Kept the production constraint and reproduced the old race in isolated demonstration tables without that upper-bound check; the production repository uses the atomic conditional update |
+
+## Decisions the brief left open
+
+- **Database path:** the default is `data/event-ticketing.sqlite`; `DATABASE_PATH` can select another path. The default database and its SQLite WAL/SHM files are ignored by Git.
+- **Seed behavior:** `npm run seed` and demo mode seed only if the database has no events; they do not overwrite or append to an existing dataset.
+- **User rows:** because bookings now have a foreign key to `users`, the repository creates a minimal user row (id and creation timestamp) when a booking is stored. This does not authenticate `x-user-id` or add profiles.
+- **Race demonstration:** the pre-fix race uses temporary demonstration tables, keeping the production table's required capacity check intact.
+- **React scope:** the existing React UI continues to use its local domain store. Build 5 changes the REST API persistence and intentionally does not rewire the UI to the API.
+- **Runtime verification:** validation ran with Node 24.22.0, which provides `node:sqlite`; Node 22.13 compatibility was not separately exercised in this environment.
+
+## Not built yet
+
+The UI is not wired to the persistent API; authentication, waitlist endpoints, paging, rate limiting, CORS, refunds and
+check-in endpoints also remain later work.

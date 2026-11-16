@@ -39,13 +39,13 @@ function resolveImport(file, specifier) {
 
 const files = listFiles();
 const layerOf = (file) => {
-  if (file === 'domain/inventory.js' || file.startsWith('repositories/')) return 'data';
+  if (file === 'domain/inventory.js' || file.startsWith('repositories/') || file.startsWith('db/')) return 'data';
   if (file.startsWith('domain/')) return 'rules';
   return file.split('/')[0];
 };
 
 test('the project has the layers the architecture document describes', () => {
-  for (const folder of ['http', 'services', 'domain', 'repositories', 'lib']) assert.ok(existsSync(path.join(SRC, folder)), `src/${folder} is missing`);
+  for (const folder of ['http', 'services', 'domain', 'repositories', 'db', 'lib']) assert.ok(existsSync(path.join(SRC, folder)), `src/${folder} is missing`);
   assert.ok(files.includes('http/router.js') && files.includes('http/app.js') && files.includes('domain/bookingStateMachine.js'));
 });
 
@@ -68,12 +68,12 @@ test('RULES (src/domain, pure) import only other rule files and Node built-ins: 
   }
 });
 
-test('DATA (inventory and repositories) imports only rules and Node built-ins', () => {
+test('DATA (inventory, repositories and database connection) imports only data, rules and Node built-ins', () => {
   for (const file of files.filter((f) => layerOf(f) === 'data')) {
     for (const specifier of importsOf(file)) {
       const target = resolveImport(file, specifier);
       if (target.external) assert.ok(target.external.startsWith('node:'), `${file} imports the package "${specifier}"`);
-      else assert.equal(layerOf(target.internal), 'rules', `${file} imports ${target.internal}`);
+      else assert.ok(['data', 'rules'].includes(layerOf(target.internal)), `${file} imports ${target.internal}`);
     }
   }
 });

@@ -11,6 +11,12 @@ test('with nothing set: port 3000, this computer only', () => {
   assert.equal(DEFAULT_PORT, 3000);
   assert.equal(config.host, DEFAULT_HOST);
   assert.equal(config.host, '127.0.0.1');
+  assert.ok(config.databasePath.endsWith('data/event-ticketing.sqlite'));
+});
+
+test('DATABASE_PATH can point the server at a chosen SQLite file', () => {
+  assert.equal(loadConfig({ DATABASE_PATH: '/tmp/ticketing.sqlite' }).databasePath, '/tmp/ticketing.sqlite');
+  assert.equal(loadConfig({ DATABASE_PATH: '  ' }).databasePath.endsWith('data/event-ticketing.sqlite'), true);
 });
 
 test('PORT comes from the environment', () => {

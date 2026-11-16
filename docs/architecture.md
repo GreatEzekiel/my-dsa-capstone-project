@@ -37,7 +37,9 @@ flowchart TD
     end
 
     subgraph data["4. Data  ·  src/repositories"]
-        repo[("memory repository<br/>events, tiers, bookings")]
+        repo[("SQLite repository<br/>events, tiers, bookings")]
+        memory["memory repository<br/>(service tests)"]
+        schema["db/schema.sql<br/>constraints"]
     end
 
     subgraph infrastructure["Payment adapter  ·  src/lib"]
@@ -50,6 +52,7 @@ flowchart TD
     services -->|"asks"| rules
     services -->|"reads and writes through injected repository"| data
     data -->|"checks booking moves"| rules
+    repo --> schema
     services -->|"calls injected payment interface"| gateway
     composition -.->|"injects"| repo
     composition -.->|"injects"| gateway
@@ -60,7 +63,7 @@ flowchart TD
 - **Routes** (`src/http`) may read the request (method, path, `:params`, JSON body), call one service function and turn its result or its error into a JSON response, but may not contain business rules, touch the data, or import the rules directly.
 - **Services** (`src/services`) may combine rules and injected repository/payment interfaces into one use case ("pay a booking") and decide the order of the steps, but may not know about HTTP (no request, no response, no status codes) or import a concrete repository or gateway.
 - **Rules** (`src/domain`, the pure files) may only decide things from the values they are given (is this move allowed? does this event match?) and throw a `DomainError`, but may not read or write data, touch the network, files or the clock, or call any other layer.
-- **Data** (`src/repositories`) may store and fetch records and keep them consistent (seats sold always match the bookings), but may not know about HTTP or services, and must consult the rules before it changes a booking's status.
+- **Data** (`src/repositories` and `src/db`) may store and fetch records and keep them consistent (including atomically reserving seats within capacity), but may not know about HTTP or services, and repositories must consult the rules before changing a booking's status.
 
 **The dependency rule, in one table.** `test/architecture.test.js` reads every `import` in the project and fails if an arrow points the wrong way.
 
@@ -70,17 +73,20 @@ flowchart TD
 | `src/services` | `src/services`, `src/domain`; repositories and payment gateways are injected |
 | `src/domain` (rules) | other rule files, never `inventory.js`, never `services` or `http` |
 | `src/repositories` (data) | `src/domain` rule files |
+| `src/db` (SQLite setup/schema) | Node built-ins only |
+| `src/server.js` (composition root) | config, HTTP, repository, database, service and adapter construction |
 | `src/lib` (payment adapter) | Node built-ins only; it receives no card number |
 | `src/ui` (React) | `src/domain` for now (see below) |
 
 **Where things are today.** The pure rules are separate files: `bookingStateMachine.js`, `eventSearch.js`,
 `sorting.js`, `dates.js`, `money.js`, `ids.js`, `waitlistQueue.js`. The API uses the asynchronous
-`repositories/memory.js`; it is replaced by a persistent repository in a later build. The older `domain/inventory.js`
-remains the browser UI's local data layer. The services folder holds `eventService`, `bookingService` and `healthService`.
+`repositories/sqlite.js` for persistent API data; `repositories/memory.js` remains available to service tests. The
+older `domain/inventory.js` remains the browser UI's local data layer. The services folder holds `eventService`,
+`bookingService` and `healthService`.
 The booking service receives the mock gateway through dependency injection; the gateway never sees card data.
 
-**The React screen** (`src/ui`) is a separate client. The API now has event and booking routes, but the screen still runs the domain in
-the browser; switching it to call the HTTP API (and dropping the domain import) is a later step.
+**The React screen** (`src/ui`) is a separate client. The API persists event and booking routes in SQLite, but the screen
+still runs the domain in the browser; switching it to call the HTTP API (and dropping the domain import) is a later step.
 
 **The journey of `GET /health`:** the client sends the request, `app.js` finds the route in the router, the route handler calls
 `services.health.check()`, the service returns `{ status: 'ok' }`, and `app.js` writes it as JSON. If anything throws,
@@ -100,9 +106,10 @@ erDiagram
 
     USER {
         string id PK
-        string name
-        string email UK
-        string role "organizer or attendee"
+        string createdAt "ISO 8601"
+        string name "not stored yet"
+        string email "not stored yet"
+        string role "not stored yet"
     }
     EVENT {
         string id PK
@@ -111,7 +118,7 @@ erDiagram
         string venue
         string startsAt "ISO 8601 date and time"
         string status "draft or published"
-        string organizerId FK "planned, needs USER"
+        string organizerId "not stored yet"
     }
     TICKET_TIER {
         string id PK
@@ -126,7 +133,7 @@ erDiagram
         string reference UK "short readable code like 7K2M-9Q4X"
         string eventId FK
         string tierId FK
-        string userId "caller id from x-user-id; no user table yet"
+        string userId FK "created from x-user-id; not authentication"
         string customer "name on the booking"
         int quantity "1 to 10"
         int totalCents "price times quantity"
@@ -145,12 +152,14 @@ erDiagram
 
 Notes:
 
-- **`USER` does not exist in the code yet.** Build 4 accepts an `x-user-id` header to associate a booking with its caller, but it does not authenticate that user or store a user record.
+- **`USER` is now stored minimally.** SQLite creates a user row (id and creation time) when a booking is made so the booking's foreign key is valid. `x-user-id` remains caller-supplied and is not authentication; names, email addresses, roles and organizer ownership are not implemented.
 - **Money is whole cents** (kobo): `500000` is ₦5,000.00. Never decimals.
 - **`sold` follows the bookings:** it counts the seats of every booking in a state that holds seats (`pending`, `paid`, `checked_in`). `cancelled` and `refunded` give them back.
 - **A tier belongs to exactly one event**, and a booking is for exactly one tier (1 to 10 tickets).
 - **Drafts are private.** Only `published` events are public and bookable.
 - **Dates are ISO 8601 strings.** A time with no zone means Lagos time (+01:00).
+- **SQLite enforces persistence constraints.** Primary/foreign keys, unique booking references and range/status checks are in `src/db/schema.sql`; seat reservations use one conditional update inside a transaction.
+- **The waitlist is not persisted in Build 5.** Its diagram entry is carried forward from the domain model; SQLite tables and API waitlist routes are later work.
 
 ---
 
