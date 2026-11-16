@@ -235,6 +235,18 @@ async function step(user, label, n) {
 }
 
 describe('Event ticketing screen', () => {
+  test.each(['', 'http proxy error'])('explains how to start the API after an unstructured 500 (%s)', async (text) => {
+    vi.stubGlobal('fetch', async () => ({
+      ok: false,
+      status: 500,
+      async text() { return text; },
+    }));
+    render(<App />);
+    expect((await screen.findByRole('alert')).textContent).toContain(
+      'API_UNAVAILABLE: The API server is unavailable. Start it with npm start, then try again.',
+    );
+  });
+
   test('shows the event, both tiers and the booking form', async () => {
     await openApp();
     expect(screen.getByText('General admission')).toBeTruthy();

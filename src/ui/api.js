@@ -9,6 +9,14 @@ export class ApiError extends Error {
   }
 }
 
+function unavailableApi(status) {
+  return new ApiError(
+    'API_UNAVAILABLE',
+    'The API server is unavailable. Start it with npm start, then try again.',
+    status,
+  );
+}
+
 export function getUiUserId() {
   let userId = localStorage.getItem(USER_ID_KEY);
   if (!userId) {
@@ -40,11 +48,16 @@ export async function requestJson(path, { method = 'GET', body, signal, userId }
   try {
     payload = text === '' ? {} : JSON.parse(text);
   } catch {
+    if (!response.ok && response.status >= 500) throw unavailableApi(response.status);
     throw new ApiError('BAD_RESPONSE', `The API returned invalid JSON (${response.status})`, response.status);
   }
 
   if (!response.ok) {
     const error = payload?.error;
+    if (response.status >= 500
+      && (typeof error?.code !== 'string' || typeof error?.message !== 'string')) {
+      throw unavailableApi(response.status);
+    }
     throw new ApiError(
       typeof error?.code === 'string' ? error.code : 'BAD_RESPONSE',
       typeof error?.message === 'string' ? error.message : `The API request failed (${response.status})`,
